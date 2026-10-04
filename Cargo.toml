@@ -52,7 +52,7 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zbus = { version = "5", default-features = false, features = ["tokio"] }
-zstd = "0.13"
+zstd = "0.14"
 
 [profile.release]
 lto = "thin"
