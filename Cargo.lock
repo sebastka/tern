@@ -116,7 +116,7 @@ checksum = "f97b87216c9f0ccc63c516263169085fa34bba25633f6d96c6a9b9ca1fd5f70a"
 dependencies = [
  "async-channel 2.5.0",
  "async-compression",
- "base64 0.23.1",
+ "base64",
  "bytes",
  "chrono",
  "futures-util",
@@ -158,12 +158,6 @@ name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
-
-[[package]]
-name = "base64"
-version = "0.22.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "base64"
@@ -1181,7 +1175,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2c646bd5cc763b1087b15493e29a64be6147ba8f19342004fa52048ee596eae"
 dependencies = [
  "async-trait",
- "base64 0.23.1",
+ "base64",
  "email_address",
  "futures-io",
  "futures-util",
@@ -2346,7 +2340,7 @@ dependencies = [
 name = "tern-smtp"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64",
  "chrono",
  "lettre",
  "mail-parser",
