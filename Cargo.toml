@@ -24,7 +24,7 @@ ammonia = "4"
 anyhow = "1"
 async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
 async-trait = "0.1"
-base64 = "0.22"
+base64 = "0.23"
 blake3 = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 cxx = "1"
