@@ -16,9 +16,7 @@ allow = [
     "MIT-0",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
-    "BSD-2-Clause",
     "BSD-3-Clause",
-    "0BSD",
     "ISC",
     "Zlib",
     "Unicode-3.0",
@@ -32,6 +30,8 @@ confidence-threshold = 0.9
 [bans]
 multiple-versions = "allow"
 wildcards = "deny"
+# Tern's own crates refer to each other by path; they are never published.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"

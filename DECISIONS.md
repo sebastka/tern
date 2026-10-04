@@ -43,6 +43,12 @@ the implementation deliberately does less than the architecture describes
   GitHub has no "latest" label for arm64 runners. `dtolnay/rust-toolchain`
   has no releases, so it is pinned to a commit of `master` with an explicit
   `toolchain:` input.
+- **Container images are not pinned by digest:**
+  - `fedora:44` and `debian:trixie` in the workflows are fixed releases. Their
+    packages are installed fresh by dnf/apt anyway, and Dependabot can't
+    update `container:` digests.
+  - The test servers in `testenv/compose.yaml` stay on `latest`, untracked;
+    a breaking upstream change shows up as a CI failure to fix then.
 - **Dependabot** (not Renovate): weekly grouped Cargo and Actions updates.
   It is built in and needs no third-party app. Nix isn't covered, so
   `update-flake-lock.yaml` refreshes `flake.lock` monthly via a PR (needs
