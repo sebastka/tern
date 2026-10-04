@@ -36,7 +36,7 @@ notify = "8"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 regex = "1"
 rustix = { version = "1", features = ["fs"] }
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-native-certs = "0.8"
 secret-service = { version = "5", features = ["rt-tokio-crypto-rust"] }
