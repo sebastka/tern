@@ -1,0 +1,6 @@
+.*
+!.gitignore
+!.github
+/target
+/build
+/packaging/out

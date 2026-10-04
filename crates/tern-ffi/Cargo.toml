@@ -1,0 +1,17 @@
+[package]
+name = "tern-ffi"
+description = "cxx bridge exposing tern-app to the C++/Qt frontend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+cxx.workspace = true
+tern-app.workspace = true
+
+[build-dependencies]
+cxx-build.workspace = true

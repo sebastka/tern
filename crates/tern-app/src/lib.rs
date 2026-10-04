@@ -1,0 +1,876 @@
+//! UI-agnostic application facade (ARCHITECTURE.md §4).
+//!
+//! Frontends talk only to [`App`]: commands are plain method calls, results
+//! and changes arrive as [`Event`]s through the callback given to
+//! [`App::new`], on a runtime thread. Read models (folder tree, message list
+//! windows) are synchronous reads of the local store: the UI never waits for
+//! the network.
+
+mod account;
+mod cache;
+pub mod compose;
+mod dbus;
+pub mod format;
+mod hub;
+mod logging;
+pub mod render;
+mod tree;
+pub mod types;
+
+use std::collections::{BTreeMap, HashSet};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
+use std::time::Duration;
+
+use tern_config::{ConfigWatcher, Dirs, GlobalConfig, Profile};
+use tern_core::lock::{LockError, ProfileLock};
+use tern_core::thread::ThreadRow;
+use tern_core::{Flags, ops};
+use tern_pgp::Gpg;
+use tracing::{info, warn};
+
+use crate::account::{AccountRt, Request};
+use crate::hub::Hub;
+use crate::render::{RenderOptions, Rendered};
+pub use crate::types::*;
+
+pub const URL_SCHEME: &str = "tern-msg";
+
+#[derive(Debug, thiserror::Error)]
+pub enum OpenError {
+    #[error("profile {0:?} is already open in another Tern window")]
+    AlreadyRunning(String),
+    #[error("no profile named {0:?}")]
+    NoSuchProfile(String),
+    #[error("{0}")]
+    Other(String),
+}
+
+struct ProfileState {
+    name: String,
+    config: Option<Profile>,
+    accounts: Vec<Arc<AccountRt>>,
+    issues: Vec<String>,
+    _lock: ProfileLock,
+    _watcher: Option<ConfigWatcher>,
+    _dbus: Option<zbus::Connection>,
+}
+
+impl Drop for ProfileState {
+    fn drop(&mut self) {
+        for a in &self.accounts {
+            a.stop();
+        }
+    }
+}
+
+#[derive(Default)]
+struct ListState {
+    folder: Option<FolderKey>,
+    threaded: bool,
+    query: String,
+    rows: Vec<ThreadRow>,
+}
+
+struct Inner {
+    dirs: Dirs,
+    hub: Arc<Hub>,
+    rt: tokio::runtime::Handle,
+    global: RwLock<GlobalConfig>,
+    profile: Mutex<Option<ProfileState>>,
+    list: Mutex<ListState>,
+    /// Rendered messages, bounded by `[memory] message_cache_mb`. Decrypted
+    /// content stays here (memory only).
+    cache: Mutex<cache::RenderCache>,
+    current: Mutex<Option<MessageKey>>,
+    remote_allowed: Mutex<HashSet<MessageKey>>,
+}
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Settings a frontend needs before it starts its toolkit (they can't change
+/// at runtime).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupSettings {
+    /// `[memory] spare_renderer`
+    pub spare_renderer: bool,
+}
+
+/// Read [`StartupSettings`] from tern.toml (defaults if missing or invalid;
+/// the App reports config problems later).
+pub fn startup_settings() -> StartupSettings {
+    let g = tern_config::load_global(&Dirs::from_env().config).unwrap_or_default();
+    StartupSettings { spare_renderer: g.memory.spare_renderer }
+}
+
+pub struct App {
+    inner: Arc<Inner>,
+    runtime: Option<tokio::runtime::Runtime>,
+}
+
+impl App {
+    /// Create the app with XDG directories from the environment. `sink`
+    /// receives events on runtime threads.
+    pub fn new(sink: impl Fn(Event) + Send + Sync + 'static) -> Self {
+        Self::with_dirs(Dirs::from_env(), sink)
+    }
+
+    pub fn with_dirs(dirs: Dirs, sink: impl Fn(Event) + Send + Sync + 'static) -> Self {
+        logging::init(&dirs.logs());
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .thread_name("tern-rt")
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let global = tern_config::load_global(&dirs.config).unwrap_or_default();
+        let inner = Arc::new(Inner {
+            dirs,
+            hub: Arc::new(Hub::new(Arc::new(sink))),
+            rt: runtime.handle().clone(),
+            list: Mutex::new(ListState { threaded: global.ui.threaded, ..Default::default() }),
+            global: RwLock::new(global),
+            profile: Mutex::new(None),
+            cache: Mutex::new(cache::RenderCache::default()),
+            current: Mutex::new(None),
+            remote_allowed: Mutex::new(HashSet::new()),
+        });
+        runtime.spawn(ticker(Arc::downgrade(&inner)));
+        info!("Tern {} started", env!("CARGO_PKG_VERSION"));
+        Self { inner, runtime: Some(runtime) }
+    }
+
+    // ------------------------------------------------------------- profiles
+
+    /// Profiles and whether the picker can be skipped. `requested` is the
+    /// `--profile` argument.
+    pub fn startup_info(&self, requested: Option<&str>) -> StartupInfo {
+        let dirs = &self.inner.dirs;
+        let profiles = tern_config::list_profiles(&dirs.config);
+        let (global, issues) = match tern_config::load_global(&dirs.config) {
+            Ok(g) => (g, Vec::new()),
+            Err(e) => (GlobalConfig::default(), e.0.iter().map(|i| i.to_string()).collect()),
+        };
+        let auto_profile = match requested {
+            Some(p) => Some(p.to_owned()),
+            None if profiles.len() == 1 => profiles.first().cloned(),
+            None if !global.ask_on_startup.0 => global.default_profile.clone().filter(|p| profiles.contains(p)),
+            None => None,
+        };
+        StartupInfo { profiles, auto_profile, issues }
+    }
+
+    /// The profile used last (for preselection in the picker).
+    pub fn last_profile(&self) -> Option<String> {
+        std::fs::read_to_string(self.inner.dirs.state.join("last_profile")).ok().map(|s| s.trim().to_owned())
+    }
+
+    /// Lock and open a profile, start syncing its accounts.
+    pub fn open_profile(&self, name: &str) -> Result<(), OpenError> {
+        let inner = &self.inner;
+        if !tern_config::list_profiles(&inner.dirs.config).iter().any(|p| p == name) {
+            return Err(OpenError::NoSuchProfile(name.to_owned()));
+        }
+        let profile_lock = ProfileLock::acquire(&inner.dirs.lock_file(name)).map_err(|e| match e {
+            LockError::Held => OpenError::AlreadyRunning(name.to_owned()),
+            e => OpenError::Other(e.to_string()),
+        })?;
+        let _ = std::fs::create_dir_all(&inner.dirs.state);
+        let _ = std::fs::write(inner.dirs.state.join("last_profile"), name);
+
+        let (config, issues) = match tern_config::load_profile(&inner.dirs.config, name) {
+            Ok(p) => (Some(p), Vec::new()),
+            Err(e) => (None, e.0.iter().map(|i| i.to_string()).collect()),
+        };
+        let accounts = config.as_ref().map(|p| inner.start_accounts(p, &[])).unwrap_or_default();
+
+        let weak = Arc::downgrade(inner);
+        let watcher = ConfigWatcher::spawn(&inner.dirs.config, move || {
+            if let Some(inner) = weak.upgrade() {
+                inner.reload();
+            }
+        })
+        .map_err(|e| warn!("config watcher: {e}"))
+        .ok();
+
+        let sink = inner.hub.sink.clone();
+        let dbus = inner
+            .rt
+            .block_on(async { tokio::time::timeout(Duration::from_secs(3), dbus::serve(name, sink)).await })
+            .map_err(|_| "timeout".to_owned())
+            .and_then(|r| r.map_err(|e| e.to_string()))
+            .map_err(|e| warn!("D-Bus single-instance service unavailable: {e}"))
+            .ok();
+
+        *lock(&inner.profile) = Some(ProfileState {
+            name: name.to_owned(),
+            config,
+            accounts,
+            issues: issues.clone(),
+            _lock: profile_lock,
+            _watcher: watcher,
+            _dbus: dbus,
+        });
+        info!(profile = name, "profile opened");
+        inner.hub.emit(Event::ConfigChanged { issues });
+        inner.hub.emit(Event::FolderTreeChanged);
+        Ok(())
+    }
+
+    /// Ask the process that has `profile` open to show its window.
+    pub fn raise_existing(&self, profile: &str, activation_token: &str) -> bool {
+        self.inner
+            .rt
+            .block_on(async {
+                tokio::time::timeout(Duration::from_secs(3), dbus::raise_existing(profile, activation_token)).await
+            })
+            .map(|r| r.is_ok())
+            .unwrap_or(false)
+    }
+
+    pub fn profile_name(&self) -> Option<String> {
+        lock(&self.inner.profile).as_ref().map(|p| p.name.clone())
+    }
+
+    pub fn config_issues(&self) -> Vec<String> {
+        lock(&self.inner.profile).as_ref().map(|p| p.issues.clone()).unwrap_or_default()
+    }
+
+    pub fn accounts(&self) -> Vec<AccountInfo> {
+        let p = lock(&self.inner.profile);
+        let Some(p) = p.as_ref() else { return Vec::new() };
+        let Some(profile) = &p.config else { return Vec::new() };
+        profile
+            .accounts
+            .iter()
+            .map(|a| {
+                let pgp = a.pgp(&profile.config);
+                AccountInfo {
+                    id: a.id.clone(),
+                    name: a.config.name.clone(),
+                    email: a.config.email.clone(),
+                    sign_by_default: pgp.is_some_and(|p| p.sign_by_default),
+                    encrypt_when_possible: pgp.is_some_and(|p| p.encrypt_when_possible),
+                    has_pgp_key: pgp.is_some(),
+                    can_archive: a.archive(&profile.config).is_some(),
+                    compose_format: a.compose_format(&profile.config, &self.inner.global_config()).into(),
+                }
+            })
+            .collect()
+    }
+
+    /// UI preferences from `tern.toml`.
+    pub fn prefer_plain_text(&self) -> bool {
+        self.inner.global.read().unwrap_or_else(|p| p.into_inner()).ui.prefer_plain_text
+    }
+
+    pub fn threaded_by_default(&self) -> bool {
+        self.inner.global.read().unwrap_or_else(|p| p.into_inner()).ui.threaded
+    }
+
+    // ------------------------------------------------------------ read models
+
+    pub fn folder_tree(&self) -> Vec<FolderNode> {
+        let mut out = Vec::new();
+        for acc in self.inner.accounts() {
+            let folders = acc.store.folders().unwrap_or_default();
+            tree::append_account(&mut out, &acc.id, &acc.config.config.name, &folders);
+        }
+        out
+    }
+
+    /// Make `folder` the current message list. An empty `query` lists all
+    /// messages, otherwise search results (newest first, flat). Returns the
+    /// row count.
+    pub fn open_list(&self, folder: FolderKey, threaded: bool, query: &str) -> u32 {
+        let mut l = lock(&self.inner.list);
+        l.folder = Some(folder);
+        l.threaded = threaded;
+        l.query = query.trim().to_owned();
+        self.inner.recompute_list(&mut l);
+        l.rows.len() as u32
+    }
+
+    pub fn close_list(&self) {
+        *lock(&self.inner.list) = ListState::default();
+    }
+
+    pub fn list_count(&self) -> u32 {
+        lock(&self.inner.list).rows.len() as u32
+    }
+
+    /// A window of the current list.
+    pub fn list_rows(&self, offset: u32, count: u32) -> Vec<MessageRow> {
+        let (account, window) = {
+            let l = lock(&self.inner.list);
+            let Some(folder) = &l.folder else { return Vec::new() };
+            let start = (offset as usize).min(l.rows.len());
+            let end = (start + count as usize).min(l.rows.len());
+            (folder.account.clone(), l.rows[start..end].to_vec())
+        };
+        let Some(acc) = self.inner.account(&account) else { return Vec::new() };
+        window
+            .iter()
+            .filter_map(|r| {
+                let m = acc.store.message(r.id).ok().flatten()?;
+                let e = &m.envelope;
+                Some(MessageRow {
+                    key: MessageKey { account: account.clone(), id: m.id },
+                    depth: r.depth,
+                    thread_size: r.thread_size,
+                    date: e.date,
+                    from: e.from.first().map(|a| a.short().to_owned()).unwrap_or_default(),
+                    to: e.to.first().map(|a| a.short().to_owned()).unwrap_or_default(),
+                    subject: e.subject.clone(),
+                    unread: !m.flags.contains(Flags::SEEN),
+                    flagged: m.flags.contains(Flags::FLAGGED),
+                    answered: m.flags.contains(Flags::ANSWERED),
+                    has_attachments: e.has_attachments,
+                    encrypted: e.encrypted,
+                    size: m.size,
+                })
+            })
+            .collect()
+    }
+
+    /// Position of a message in the current list (to keep the selection
+    /// across refreshes).
+    pub fn list_index_of(&self, key: &MessageKey) -> Option<u32> {
+        let l = lock(&self.inner.list);
+        if l.folder.as_ref().is_none_or(|f| f.account != key.account) {
+            return None;
+        }
+        l.rows.iter().position(|r| r.id == key.id).map(|i| i as u32)
+    }
+
+    // ------------------------------------------------------------- messages
+
+    /// Render a message; the result arrives as `Event::MessageLoaded`.
+    pub fn open_message(&self, key: MessageKey, allow_remote: bool) {
+        *lock(&self.inner.current) = Some(key.clone());
+        if allow_remote {
+            lock(&self.inner.remote_allowed).insert(key.clone());
+        }
+        let inner = self.inner.clone();
+        self.inner.rt.spawn(async move { inner.load_message(key).await });
+    }
+
+    /// Serve a `tern-msg:` URL: (MIME type, bytes).
+    pub fn resource(&self, url: &str) -> Option<(String, Vec<u8>)> {
+        let path = url.strip_prefix(URL_SCHEME)?.strip_prefix(':')?.trim_start_matches('/');
+        let path = path.split(['?', '#']).next().unwrap_or(path);
+        let mut it = path.splitn(4, '/');
+        let account = it.next()?;
+        let id: i64 = it.next()?.parse().ok()?;
+        let kind = it.next()?;
+        let rest = it.next();
+        let r = self.inner.cached(&MessageKey { account: account.to_owned(), id })?;
+        let html = "text/html; charset=utf-8".to_owned();
+        match (kind, rest) {
+            ("html", _) => r.html_doc.clone().map(|d| (html, d.into_bytes())),
+            ("text", _) => Some((html, r.text_doc.clone().into_bytes())),
+            ("cid", Some(cid)) => r.cids.get(&render::percent_decode(cid)).map(|(t, d)| (t.clone(), d.clone())),
+            _ => None,
+        }
+    }
+
+    /// An attachment of a loaded message: (file name, bytes).
+    pub fn attachment(&self, key: &MessageKey, index: u32) -> Option<(String, Vec<u8>)> {
+        let r = self.inner.cached(key)?;
+        r.attachments.iter().find(|(a, _)| a.index == index).map(|(a, d)| (a.filename.clone(), d.clone()))
+    }
+
+    pub fn mark_read(&self, keys: &[MessageKey], read: bool) {
+        let (add, remove) = if read { (Flags::SEEN, Flags::empty()) } else { (Flags::empty(), Flags::SEEN) };
+        self.inner.change(keys, |acc, ids| ops::set_flags(&acc.store, ids, add, remove));
+    }
+
+    pub fn mark_flagged(&self, keys: &[MessageKey], flagged: bool) {
+        let (add, remove) = if flagged { (Flags::FLAGGED, Flags::empty()) } else { (Flags::empty(), Flags::FLAGGED) };
+        self.inner.change(keys, |acc, ids| ops::set_flags(&acc.store, ids, add, remove));
+    }
+
+    /// Move messages to a folder of the same account.
+    pub fn move_messages(&self, keys: &[MessageKey], target: &FolderKey) {
+        if keys.iter().any(|k| k.account != target.account) {
+            self.inner.hub.error("Moving messages between accounts is not supported".into());
+            return;
+        }
+        self.inner.change(keys, |acc, ids| ops::move_messages(&acc.store, ids, target.folder));
+    }
+
+    /// Move to Trash, or delete permanently from Trash.
+    pub fn delete_messages(&self, keys: &[MessageKey]) {
+        self.inner.change(keys, |acc, ids| ops::delete(&acc.store, ids));
+    }
+
+    /// Archive: move to the account's Archive folder, if it has one.
+    /// Archive: move each message to the account's `archive` folder pattern
+    /// (e.g. `Archive/{year}` with the message's year), creating folders as
+    /// needed. Accounts without a pattern are skipped.
+    pub fn archive_messages(&self, keys: &[MessageKey]) {
+        for (account, group) in group_by_account(keys) {
+            let Some(acc) = self.inner.account(&account) else { continue };
+            let pattern = {
+                let p = lock(&self.inner.profile);
+                p.as_ref()
+                    .and_then(|p| p.config.as_ref())
+                    .and_then(|prof| prof.account(&account).and_then(|a| a.archive(&prof.config)).map(str::to_owned))
+            };
+            let Some(pattern) = pattern else {
+                self.inner.hub.error(format!("{}: no archive folder configured", acc.config.config.name));
+                continue;
+            };
+            if let Err(e) = self.inner.archive(&acc, &group, &pattern) {
+                self.inner.hub.error(format!("Archiving failed: {e}"));
+            }
+        }
+    }
+
+    /// Sync all accounts now.
+    pub fn sync_now(&self) {
+        for a in self.inner.accounts() {
+            a.request(Request::Sync);
+        }
+    }
+
+    // -------------------------------------------------------------- compose
+
+    /// Prepare a reply/forward; the draft arrives as `Event::ComposeReady`.
+    pub fn prepare_reply(&self, key: MessageKey, mode: ReplyMode) {
+        let inner = self.inner.clone();
+        self.inner.rt.spawn(async move {
+            let rendered = match inner.cached(&key) {
+                Some(r) => Some(r),
+                None => inner.render(&key).await,
+            };
+            let Some(r) = rendered else {
+                inner.hub.error("The message body is not downloaded yet".into());
+                return;
+            };
+            let Some(acc) = inner.account(&key.account) else { return };
+            let (fmt, sig) = inner.compose_settings(&key.account);
+            let mut draft = compose::reply_template(&key, &r, mode, &acc.config.config.email, fmt, sig.as_ref());
+            inner.apply_pgp_defaults(&mut draft, r.encrypted);
+            inner.hub.emit(Event::ComposeReady(draft));
+        });
+    }
+
+    /// An empty draft for an account, with its PGP defaults.
+    /// An empty draft for an account: its editor format, signature and PGP
+    /// defaults.
+    pub fn new_draft(&self, account: &str) -> Draft {
+        let (format, sig) = self.inner.compose_settings(account);
+        let mut d = Draft {
+            account: account.to_owned(),
+            body: compose::new_body(format, sig.as_ref()),
+            format,
+            ..Default::default()
+        };
+        self.inner.apply_pgp_defaults(&mut d, false);
+        d
+    }
+
+    /// Convert a draft body when the user switches editor mode.
+    pub fn convert_body(&self, body: &str, from: BodyFormat, to: BodyFormat) -> String {
+        format::convert(body, from, to)
+    }
+
+    /// HTML document previewing a Markdown body as it will be sent.
+    pub fn markdown_preview(&self, markdown: &str) -> String {
+        format::markdown_preview(markdown)
+    }
+
+    /// Build the message (sign/encrypt), put it in the outbox and send it in
+    /// the background. Returns a request id: `Event::DraftQueued` reports
+    /// whether the message could be built and queued, `Event::SendResult`
+    /// later reports the SMTP outcome.
+    pub fn send(&self, draft: Draft) -> u64 {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let request = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let inner = self.inner.clone();
+        self.inner.rt.spawn(async move {
+            let error = inner.send(draft).await.err().unwrap_or_default();
+            inner.hub.emit(Event::DraftQueued { request, error });
+        });
+        request
+    }
+
+    /// Stop all background work and release the profile.
+    pub fn close_profile(&self) {
+        let state = lock(&self.inner.profile).take();
+        drop(state);
+        *lock(&self.inner.list) = ListState::default();
+        lock(&self.inner.cache).clear();
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        self.close_profile();
+        if let Some(rt) = self.runtime.take() {
+            rt.shutdown_timeout(Duration::from_secs(2));
+        }
+    }
+}
+
+fn group_by_account(keys: &[MessageKey]) -> BTreeMap<String, Vec<MessageKey>> {
+    let mut map: BTreeMap<String, Vec<MessageKey>> = BTreeMap::new();
+    for k in keys {
+        map.entry(k.account.clone()).or_default().push(k.clone());
+    }
+    map
+}
+
+impl Inner {
+    fn accounts(&self) -> Vec<Arc<AccountRt>> {
+        lock(&self.profile).as_ref().map(|p| p.accounts.clone()).unwrap_or_default()
+    }
+
+    fn account(&self, id: &str) -> Option<Arc<AccountRt>> {
+        self.accounts().into_iter().find(|a| a.id == id)
+    }
+
+    fn gpg(&self) -> Gpg {
+        let g = self.global.read().unwrap_or_else(|p| p.into_inner());
+        Gpg::new(g.gpg.program.clone()).with_wkd(g.gpg.wkd_lookup)
+    }
+
+    /// Start runtimes for `profile`'s accounts, reusing `keep` entries whose
+    /// configuration is unchanged.
+    fn start_accounts(&self, profile: &Profile, keep: &[Arc<AccountRt>]) -> Vec<Arc<AccountRt>> {
+        let data = self.dirs.profile_data(&profile.name);
+        profile
+            .accounts
+            .iter()
+            .filter_map(|a| {
+                if let Some(existing) = keep.iter().find(|k| k.id == a.id && k.config == *a) {
+                    return Some(existing.clone());
+                }
+                match account::start(&data, a.clone(), &profile.config, self.hub.clone(), &self.rt) {
+                    Ok(rt) => Some(rt),
+                    Err(e) => {
+                        self.hub.error(format!("{}: cannot open local store: {e}", a.config.name));
+                        None
+                    }
+                }
+            })
+            .collect()
+    }
+
+    /// Hot reload: keep the last valid config on errors (§5).
+    fn reload(&self) {
+        if let Ok(g) = tern_config::load_global(&self.dirs.config) {
+            *self.global.write().unwrap_or_else(|p| p.into_inner()) = g;
+        }
+        let mut guard = lock(&self.profile);
+        let Some(state) = guard.as_mut() else { return };
+        match tern_config::load_profile(&self.dirs.config, &state.name) {
+            Ok(profile) => {
+                if state.config.as_ref() == Some(&profile) && state.issues.is_empty() {
+                    return;
+                }
+                let new = self.start_accounts(&profile, &state.accounts);
+                for old in &state.accounts {
+                    if !new.iter().any(|n| Arc::ptr_eq(n, old)) {
+                        old.stop();
+                    }
+                }
+                state.accounts = new;
+                state.config = Some(profile);
+                state.issues.clear();
+                info!("configuration reloaded");
+                drop(guard);
+                self.hub.emit(Event::ConfigChanged { issues: Vec::new() });
+                self.hub.emit(Event::FolderTreeChanged);
+            }
+            Err(e) => {
+                state.issues = e.0.iter().map(|i| i.to_string()).collect();
+                let issues = state.issues.clone();
+                drop(guard);
+                warn!("configuration has errors, keeping the previous one");
+                self.hub.emit(Event::ConfigChanged { issues });
+            }
+        }
+    }
+
+    fn recompute_list(&self, l: &mut ListState) {
+        let Some(folder) = &l.folder else {
+            l.rows.clear();
+            return;
+        };
+        let Some(acc) = self.account(&folder.account) else {
+            l.rows.clear();
+            return;
+        };
+        let flat = |ids: Vec<i64>| ids.into_iter().map(|id| ThreadRow { id, depth: 0, thread_size: 0 }).collect();
+        l.rows = if !l.query.is_empty() {
+            flat(acc.store.search(Some(folder.folder), &l.query, 5000).unwrap_or_default())
+        } else if l.threaded {
+            tern_core::thread::thread(&acc.store.thread_inputs(folder.folder).unwrap_or_default())
+        } else {
+            flat(acc.store.ids_by_date(folder.folder).unwrap_or_default())
+        };
+    }
+
+    /// Apply a local change grouped by account, then refresh and queue the
+    /// server replay.
+    fn change(&self, keys: &[MessageKey], f: impl Fn(&AccountRt, &[i64]) -> tern_core::Result<()>) {
+        for (account, group) in group_by_account(keys) {
+            let Some(acc) = self.account(&account) else { continue };
+            let ids: Vec<i64> = group.iter().map(|k| k.id).collect();
+            let folders: HashSet<i64> =
+                acc.store.messages(&ids).unwrap_or_default().iter().map(|m| m.folder_id).collect();
+            match f(&acc, &ids) {
+                Ok(()) => {
+                    for folder in folders {
+                        self.hub.folder_dirty(&account, folder);
+                    }
+                    // Moves change the target folder too.
+                    for m in acc.store.messages(&ids).unwrap_or_default() {
+                        self.hub.folder_dirty(&account, m.folder_id);
+                    }
+                    acc.request(Request::Replay);
+                }
+                Err(e) => self.hub.error(e.to_string()),
+            }
+        }
+    }
+
+    fn cached(&self, key: &MessageKey) -> Option<Arc<Rendered>> {
+        lock(&self.cache).get(key)
+    }
+
+    /// Render from the local store (None if the body isn't downloaded).
+    async fn render(&self, key: &MessageKey) -> Option<Arc<Rendered>> {
+        let acc = self.account(&key.account)?;
+        let m = acc.store.message(key.id).ok()??;
+        let raw = acc.blobs.get(m.blob.as_deref()?).ok()?;
+        let sender = m.envelope.from.first().map(|a| a.email.clone()).unwrap_or_default();
+        let allow_remote = lock(&self.remote_allowed).contains(key)
+            || lock(&self.profile)
+                .as_ref()
+                .and_then(|p| p.config.as_ref())
+                .is_some_and(|p| p.config.remote_content.allows(&sender));
+        let gpg = self.gpg();
+        let opts =
+            RenderOptions { gpg: &gpg, allow_remote, url_base: format!("{URL_SCHEME}:/{}/{}", key.account, key.id) };
+        let r = Arc::new(render::render(&raw, &opts).await);
+        let limit = self.global_config().memory.message_cache_mb as usize * 1024 * 1024;
+        let current = lock(&self.current).clone();
+        let mut cache = lock(&self.cache);
+        cache.insert(key.clone(), r.clone(), limit, current.as_ref());
+        tracing::debug!(entries = cache.len(), bytes = cache.bytes(), "render cache");
+        Some(r)
+    }
+
+    async fn load_message(&self, key: MessageKey) {
+        let Some(acc) = self.account(&key.account) else { return };
+        let Some(m) = acc.store.message(key.id).ok().flatten() else {
+            self.hub.error("Message not found".into());
+            return;
+        };
+        let base = format!("{URL_SCHEME}:/{}/{}", key.account, key.id);
+        if m.blob.is_none() {
+            acc.request(Request::Body(key.id));
+            let e = &m.envelope;
+            let list = |l: &[tern_core::Address]| l.iter().map(|a| a.display()).collect::<Vec<_>>().join(", ");
+            self.hub.emit(Event::MessageLoaded(MessageView {
+                key,
+                subject: e.subject.clone(),
+                from: list(&e.from),
+                to: list(&e.to),
+                cc: list(&e.cc),
+                date: e.date,
+                url: String::new(),
+                text_url: String::new(),
+                text: String::new(),
+                has_html: false,
+                has_remote_content: false,
+                remote_allowed: false,
+                attachments: Vec::new(),
+                encrypted: e.encrypted,
+                decryption_failed: false,
+                signature: SignatureState::None,
+                signature_text: String::new(),
+                body_missing: true,
+            }));
+            return;
+        }
+        let Some(r) = self.render(&key).await else { return };
+        // The user may have moved on while gpg was running.
+        if lock(&self.current).as_ref() != Some(&key) {
+            return;
+        }
+        let prefer_plain = self.global.read().unwrap_or_else(|p| p.into_inner()).ui.prefer_plain_text;
+        let has_html = r.html_doc.is_some();
+        self.hub.emit(Event::MessageLoaded(MessageView {
+            key,
+            subject: r.subject.clone(),
+            from: r.from.clone(),
+            to: r.to.clone(),
+            cc: r.cc.clone(),
+            date: r.date,
+            url: if has_html && !prefer_plain { format!("{base}/html") } else { format!("{base}/text") },
+            text_url: format!("{base}/text"),
+            text: r.text.clone(),
+            has_html,
+            has_remote_content: r.has_remote_content,
+            remote_allowed: r.remote_allowed,
+            attachments: r.attachments.iter().map(|(a, _)| a.clone()).collect(),
+            encrypted: r.encrypted,
+            decryption_failed: r.decryption_failed,
+            signature: r.signature,
+            signature_text: r.signature_text.clone(),
+            body_missing: false,
+        }));
+    }
+
+    fn global_config(&self) -> GlobalConfig {
+        self.global.read().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// Editor format and signature for an account. A signature that can't be
+    /// read is reported and left out.
+    fn compose_settings(&self, account: &str) -> (BodyFormat, Option<format::Signature>) {
+        let global = self.global_config();
+        let (fmt, sig_path) = {
+            let p = lock(&self.profile);
+            let Some(prof) = p.as_ref().and_then(|p| p.config.as_ref()) else {
+                return (BodyFormat::Plain, None);
+            };
+            let Some(a) = prof.account(account) else { return (BodyFormat::Plain, None) };
+            (a.compose_format(&prof.config, &global), a.signature(&prof.config, &self.dirs.config))
+        };
+        let sig = sig_path.and_then(|path| match format::load_signature(&path) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                self.hub.error(format!("Signature not added: {e}"));
+                None
+            }
+        });
+        (fmt.into(), sig)
+    }
+
+    /// Move messages into folders expanded from an archive pattern.
+    fn archive(&self, acc: &AccountRt, keys: &[MessageKey], pattern: &str) -> tern_core::Result<()> {
+        use chrono::Datelike;
+        let folders = acc.store.folders()?;
+        let delimiter = folders.iter().find_map(|f| f.delimiter.clone()).unwrap_or_else(|| "/".into());
+        let ids: Vec<i64> = keys.iter().map(|k| k.id).collect();
+        let mut targets: BTreeMap<String, Vec<i64>> = BTreeMap::new();
+        for m in acc.store.messages(&ids)? {
+            let date =
+                chrono::DateTime::from_timestamp(m.envelope.date, 0).unwrap_or_default().with_timezone(&chrono::Local);
+            let name = pattern
+                .replace("{year}", &format!("{:04}", date.year()))
+                .replace("{month}", &format!("{:02}", date.month()))
+                .replace('/', &delimiter);
+            targets.entry(name).or_default().push(m.id);
+        }
+        let sources: HashSet<i64> = acc.store.messages(&ids)?.iter().map(|m| m.folder_id).collect();
+        for (name, ids) in targets {
+            let folder = ops::ensure_folder(&acc.store, &name, Some(&delimiter))?;
+            ops::move_messages(&acc.store, &ids, folder)?;
+            self.hub.folder_dirty(&acc.id, folder);
+        }
+        for f in sources {
+            self.hub.folder_dirty(&acc.id, f);
+        }
+        acc.request(Request::Replay);
+        Ok(())
+    }
+
+    fn apply_pgp_defaults(&self, d: &mut Draft, replying_to_encrypted: bool) {
+        // Replies to encrypted mail stay encrypted, configured or not: the
+        // quoted text was decrypted with the user's keyring.
+        d.encrypt = replying_to_encrypted;
+        let p = lock(&self.profile);
+        let Some(profile) = p.as_ref().and_then(|p| p.config.as_ref()) else { return };
+        let Some(acc) = profile.account(&d.account) else { return };
+        if let Some(pgp) = acc.pgp(&profile.config) {
+            d.sign = pgp.sign_by_default;
+            d.encrypt |= pgp.encrypt_when_possible;
+        }
+    }
+
+    async fn send(&self, draft: Draft) -> Result<(), String> {
+        let (acc, from, key) = {
+            let p = lock(&self.profile);
+            let profile = p.as_ref().and_then(|p| p.config.as_ref()).ok_or("no profile open")?;
+            let a = profile.account(&draft.account).ok_or("unknown account")?;
+            let from = tern_core::Address {
+                name: a.display_name(&profile.config).map(str::to_owned),
+                email: a.config.email.clone(),
+            };
+            let key = a.pgp(&profile.config).map(|p| p.key.clone());
+            (a.id.clone(), from, key)
+        };
+        // Not inside the block above: `account()` takes the profile lock too.
+        let acc = self.account(&acc).ok_or("account not running")?;
+        let forwarded = match &draft.forward_message {
+            Some(k) => {
+                let m = acc.store.message(k.id).map_err(|e| e.to_string())?.ok_or("forwarded message not found")?;
+                let blob = m.blob.ok_or("the forwarded message is not downloaded yet")?;
+                Some(acc.blobs.get(&blob).map_err(|e| e.to_string())?)
+            }
+            None => None,
+        };
+        let gpg = self.gpg();
+        let sender = compose::Sender { from, pgp_key: key.as_deref() };
+        let built = compose::build(&draft, &sender, &gpg, forwarded).await?;
+        let meta = tern_smtp::OutboxMeta {
+            from: built.from,
+            recipients: built.recipients,
+            subject: built.subject,
+            queued_at: chrono::Utc::now().timestamp(),
+            attempts: 0,
+            last_error: None,
+            failed: false,
+            save_to_sent: acc.config.config.smtp.save_to_sent,
+            reply_to_message: draft.reply_to_message.as_ref().filter(|k| k.account == acc.id).map(|k| k.id),
+        };
+        acc.outbox.enqueue(&built.raw, &meta).map_err(|e| format!("cannot write to the outbox: {e}"))?;
+        acc.request(Request::Outbox);
+        Ok(())
+    }
+}
+
+/// Coalesce hub notifications into frontend events.
+async fn ticker(weak: Weak<Inner>) {
+    let mut interval = tokio::time::interval(Duration::from_millis(250));
+    loop {
+        interval.tick().await;
+        let Some(inner) = weak.upgrade() else { return };
+        let dirty = inner.hub.take();
+        if dirty.tree {
+            inner.hub.emit(Event::FolderTreeChanged);
+        }
+        let changed_count = {
+            let mut l = lock(&inner.list);
+            let hit = l.folder.as_ref().is_some_and(|f| dirty.folders.contains(&(f.account.clone(), f.folder)));
+            if hit {
+                inner.recompute_list(&mut l);
+                Some(l.rows.len() as u32)
+            } else {
+                None
+            }
+        };
+        if let Some(count) = changed_count {
+            inner.hub.emit(Event::ListChanged { count });
+        }
+        for ((account, folder), (done, total)) in dirty.progress {
+            inner.hub.emit(Event::Progress { account, folder, done, total });
+        }
+        let current = lock(&inner.current).clone();
+        for key in dirty.bodies {
+            if current.as_ref() == Some(&key) {
+                // Not awaited: gpg may wait for a passphrase, and the ticker
+                // must keep delivering list updates meanwhile.
+                let inner = inner.clone();
+                tokio::spawn(async move { inner.load_message(key).await });
+            }
+        }
+    }
+}

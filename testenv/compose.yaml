@@ -1,0 +1,25 @@
+# Local mail servers for integration tests and manual testing.
+#   docker compose -f testenv/compose.yaml up -d
+# IMAP: 127.0.0.1:31143 (plain/STARTTLS), 31993 (TLS, self-signed)
+#       any username, password "pass"
+# SMTP: 127.0.0.1:1025 (Mailpit, accepts any credentials); web UI on :8025
+---
+name: tern-testenv
+services:
+  dovecot:
+    image: dovecot/dovecot:latest
+    environment:
+      USER_PASSWORD: pass
+    ports:
+      - "127.0.0.1:31143:31143"
+      - "127.0.0.1:31993:31993"
+    volumes:
+      - ./dovecot/tern-test.conf:/etc/dovecot/conf.d/tern-test.conf:ro
+  mailpit:
+    image: axllent/mailpit:latest
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "1"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "1"
+    ports:
+      - "127.0.0.1:1025:1025"
+      - "127.0.0.1:8025:8025"

@@ -1,0 +1,31 @@
+[package]
+name = "tern-app"
+description = "UI-agnostic application facade of Tern: commands, events, view models"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ammonia.workspace = true
+chrono.workspace = true
+html2text.workspace = true
+htmd.workspace = true
+mail-parser.workspace = true
+pulldown-cmark.workspace = true
+regex.workspace = true
+tern-config.workspace = true
+tern-core.workspace = true
+tern-imap.workspace = true
+tern-pgp.workspace = true
+tern-smtp.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
+zbus.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tern-imap.workspace = true

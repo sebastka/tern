@@ -1,0 +1,22 @@
+[package]
+name = "tern-smtp"
+description = "Tern outgoing mail: MIME composition, outbox and SMTP submission"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+base64.workspace = true
+chrono.workspace = true
+lettre.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tern-core.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+mail-parser.workspace = true
+tempfile.workspace = true

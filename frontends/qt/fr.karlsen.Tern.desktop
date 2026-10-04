@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Tern
+GenericName=Mail Client
+Comment=Read and send mail over IMAP and SMTP
+Exec=tern
+Icon=fr.karlsen.Tern
+Terminal=false
+Categories=Network;Email;Qt;
+StartupNotify=true
+SingleMainWindow=true

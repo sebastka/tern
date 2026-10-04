@@ -1,0 +1,38 @@
+# cargo-deny: vulnerability advisories (RustSec), licenses and sources of all
+# dependencies. Run locally with `cargo deny check`.
+
+[graph]
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+all-features = true
+
+[advisories]
+# Unmaintained crates are reported but don't fail the build on their own.
+unmaintained = "workspace"
+
+[licenses]
+# Compatible with Tern's "MIT OR Apache-2.0".
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "0BSD",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unlicense",
+    "CC0-1.0",
+    # File-level copyleft; only cssparser and dtoa-short (Servo, via ammonia).
+    "MPL-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
