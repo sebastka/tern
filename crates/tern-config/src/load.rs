@@ -49,6 +49,12 @@ impl Account {
         self.config.archive.as_deref().or(profile.archive.as_deref())
     }
 
+    /// Sent folder (`/`-separated levels): account, then profile, then
+    /// tern.toml. `None` means the server's `\Sent` folder.
+    pub fn sent_folder<'a>(&'a self, profile: &'a ProfileConfig, global: &'a GlobalConfig) -> Option<&'a str> {
+        self.config.sent_folder.as_deref().or(profile.sent_folder.as_deref()).or(global.sent_folder.as_deref())
+    }
+
     /// Editor mode: account, then profile, then tern.toml, then plain.
     pub fn compose_format(&self, profile: &ProfileConfig, global: &GlobalConfig) -> ComposeFormat {
         self.config.compose.format.or(profile.compose.format).or(global.compose.format).unwrap_or_default()
@@ -90,7 +96,7 @@ pub const MAX_SIGNATURE_BYTES: u64 = 64 * 1024;
 pub struct Profile {
     pub name: String,
     pub config: ProfileConfig,
-    /// Sorted by id.
+    /// In display order: `account_order` first, then the rest by id.
     pub accounts: Vec<Account>,
 }
 
@@ -139,11 +145,32 @@ pub fn load_global(config_dir: &Path) -> Result<GlobalConfig, ConfigErrors> {
     }
     if cfg.compose.signature.is_some() {
         issues.push(ConfigIssue {
-            file,
+            file: file.clone(),
             message: "compose.signature belongs in profile.toml or an account file, not in tern.toml".into(),
         });
     }
+    let mut push = |m: String| issues.push(ConfigIssue { file: file.clone(), message: m });
+    validate_folder_name("sent_folder", cfg.sent_folder.as_deref(), &mut push);
+    let list = &cfg.ui.message_list;
+    if list.columns.is_empty() {
+        push("ui.message_list.columns must not be empty".into());
+    }
+    if let Some(dup) = first_duplicate(&list.columns) {
+        push(format!("ui.message_list.columns lists {dup:?} twice"));
+    }
     if issues.is_empty() { Ok(cfg) } else { Err(ConfigErrors(issues)) }
+}
+
+fn first_duplicate<T: PartialEq + std::fmt::Debug>(items: &[T]) -> Option<&T> {
+    items.iter().enumerate().find(|(i, x)| items[..*i].contains(x)).map(|(_, x)| x)
+}
+
+/// A fixed folder name: `/`-separated, non-empty levels.
+fn validate_folder_name(key: &str, name: Option<&str>, push: &mut impl FnMut(String)) {
+    let Some(n) = name else { return };
+    if n.split('/').any(|l| l.trim().is_empty()) {
+        push(format!("{key} {n:?}: folder levels must not be empty"));
+    }
 }
 
 /// Names of all profile directories, sorted.
@@ -213,6 +240,20 @@ pub fn load_profile(config_dir: &Path, name: &str) -> Result<Profile, ConfigErro
         }
     }
 
+    // Accounts come sorted by id; move the listed ones to the front.
+    for id in &config.account_order {
+        // A file that exists but has errors is already reported.
+        let has_file = issues.iter().any(|i| i.file.file_stem() == Some(std::ffi::OsStr::new(id)));
+        if !accounts.iter().any(|a| &a.id == id) && !has_file {
+            issues.push(ConfigIssue {
+                file: profile_file.clone(),
+                message: format!("account_order: no account file accounts/{id}.toml"),
+            });
+        }
+    }
+    let rank = |a: &Account| config.account_order.iter().position(|id| *id == a.id).unwrap_or(usize::MAX);
+    accounts.sort_by_key(rank);
+
     if issues.is_empty() { Ok(Profile { name: name.to_owned(), config, accounts }) } else { Err(ConfigErrors(issues)) }
 }
 
@@ -225,7 +266,11 @@ fn validate_profile(c: &ProfileConfig, file: &Path, config_dir: &Path, issues: &
         validate_pgp(p, &mut push);
     }
     validate_archive(c.archive.as_deref(), &mut push);
+    validate_folder_name("sent_folder", c.sent_folder.as_deref(), &mut push);
     validate_signature(c.compose.signature.as_deref(), config_dir, &mut push);
+    if let Some(dup) = first_duplicate(&c.account_order) {
+        push(format!("account_order lists {dup:?} twice"));
+    }
 }
 
 /// `{year}`/`{month}` placeholders, `/`-separated non-empty levels.
@@ -265,6 +310,7 @@ fn validate_pgp(p: &PgpConfig, push: &mut impl FnMut(String)) {
 fn validate_account(c: &AccountConfig, file: &Path, config_dir: &Path, issues: &mut Vec<ConfigIssue>) {
     let mut push = |m: String| issues.push(ConfigIssue { file: file.into(), message: m });
     validate_archive(c.archive.as_deref(), &mut push);
+    validate_folder_name("sent_folder", c.sent_folder.as_deref(), &mut push);
     validate_signature(c.compose.signature.as_deref(), config_dir, &mut push);
     if c.name.trim().is_empty() {
         push("name must not be empty".into());
@@ -442,6 +488,67 @@ encrypt_when_possible = true
         assert_eq!(g.memory, MemoryConfig { message_cache_mb: 16, spare_renderer: false });
         write(t.path(), "tern.toml", "[memory]\nmessage_cache_mb = 0\n");
         assert!(load_global(t.path()).is_err());
+    }
+
+    #[test]
+    fn account_order() {
+        let t = tempfile::tempdir().unwrap();
+        for id in ["a", "b", "c", "d"] {
+            write(t.path(), &format!("profiles/p/accounts/{id}.toml"), ACCOUNT);
+        }
+        let ids = |p: &Profile| p.accounts.iter().map(|a| a.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&load_profile(t.path(), "p").unwrap()), ["a", "b", "c", "d"]);
+        write(t.path(), "profiles/p/profile.toml", "account_order = [\"c\", \"a\"]\n");
+        assert_eq!(ids(&load_profile(t.path(), "p").unwrap()), ["c", "a", "b", "d"]);
+        write(t.path(), "profiles/p/profile.toml", "account_order = [\"c\", \"nope\", \"c\"]\n");
+        let e = load_profile(t.path(), "p").unwrap_err();
+        assert_eq!(e.0.len(), 2, "{e}");
+    }
+
+    #[test]
+    fn sent_folder() {
+        let t = tempfile::tempdir().unwrap();
+        write(t.path(), "profiles/p/accounts/a.toml", ACCOUNT);
+        write(t.path(), "profiles/p/accounts/b.toml", &ACCOUNT.replace("[imap]", "sent_folder = \"Mine\"\n\n[imap]"));
+        let p = load_profile(t.path(), "p").unwrap();
+        let g = load_global(t.path()).unwrap();
+        assert_eq!(p.accounts[0].sent_folder(&p.config, &g), None);
+        assert_eq!(p.accounts[1].sent_folder(&p.config, &g), Some("Mine"));
+
+        write(t.path(), "tern.toml", "sent_folder = \"Global\"\n");
+        let g = load_global(t.path()).unwrap();
+        assert_eq!(p.accounts[0].sent_folder(&p.config, &g), Some("Global"));
+        write(t.path(), "profiles/p/profile.toml", "sent_folder = \"INBOX/Sent\"\n");
+        let p = load_profile(t.path(), "p").unwrap();
+        assert_eq!(p.accounts[0].sent_folder(&p.config, &g), Some("INBOX/Sent"));
+        assert_eq!(p.accounts[1].sent_folder(&p.config, &g), Some("Mine"));
+
+        write(t.path(), "profiles/p/profile.toml", "sent_folder = \"INBOX//Sent\"\n");
+        assert!(load_profile(t.path(), "p").is_err());
+        write(t.path(), "tern.toml", "sent_folder = \"\"\n");
+        assert!(load_global(t.path()).is_err());
+    }
+
+    #[test]
+    fn message_list_settings() {
+        let t = tempfile::tempdir().unwrap();
+        let g = load_global(t.path()).unwrap();
+        assert_eq!(g.ui.message_list.sort_by, ListField::Date);
+        assert_eq!(g.ui.message_list.sort_order, SortOrder::Desc);
+        assert_eq!(g.ui.message_list.columns.len(), 5);
+        write(
+            t.path(),
+            "tern.toml",
+            "[ui.message_list]\ncolumns = [\"date\", \"from\", \"subject\"]\nsort_by = \"subject\"\nsort_order = \"asc\"\n",
+        );
+        let g = load_global(t.path()).unwrap();
+        assert_eq!(g.ui.message_list.columns, [ListField::Date, ListField::From, ListField::Subject]);
+        assert_eq!(g.ui.message_list.sort_by, ListField::Subject);
+        assert_eq!(g.ui.message_list.sort_order, SortOrder::Asc);
+        for bad in ["columns = []", "columns = [\"date\", \"date\"]", "columns = [\"color\"]", "sort_order = \"up\""] {
+            write(t.path(), "tern.toml", &format!("[ui.message_list]\n{bad}\n"));
+            assert!(load_global(t.path()).is_err(), "{bad}");
+        }
     }
 
     #[test]

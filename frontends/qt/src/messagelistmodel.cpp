@@ -12,6 +12,15 @@ namespace tern {
 
 MessageListModel::MessageListModel(QObject *parent) : QAbstractTableModel(parent) {}
 
+void MessageListModel::setColumns(const QList<Column> &columns)
+{
+    if (columns == m_columns)
+        return;
+    beginResetModel();
+    m_columns = columns;
+    endResetModel();
+}
+
 void MessageListModel::open(const QString &account, qint64 folder, bool threaded, const QString &query,
                             bool showRecipients)
 {
@@ -75,7 +84,10 @@ int MessageListModel::rowCount(const QModelIndex &parent) const
     return parent.isValid() ? 0 : static_cast<int>(m_count);
 }
 
-int MessageListModel::columnCount(const QModelIndex &parent) const { return parent.isValid() ? 0 : ColumnCount; }
+int MessageListModel::columnCount(const QModelIndex &parent) const
+{
+    return parent.isValid() ? 0 : static_cast<int>(m_columns.size());
+}
 
 static QString formatDate(qint64 ts)
 {
@@ -94,11 +106,11 @@ QVariant MessageListModel::data(const QModelIndex &index, int role) const
     const Row *r = rowAt(index.row());
     if (!r)
         return {};
-    const int col = index.column();
+    const Column col = columnAt(index.column());
     switch (role) {
     case Qt::DisplayRole:
         switch (col) {
-        case ColSubject: {
+        case Column::Subject: {
             QString s = r->subject.isEmpty() ? tr("(no subject)") : r->subject;
             if (r->depth > 0)
                 s.prepend(QString(static_cast<qsizetype>(qMin<quint32>(r->depth, 12)) * 3, u' ') + QStringLiteral("↳ "));
@@ -106,11 +118,17 @@ QVariant MessageListModel::data(const QModelIndex &index, int role) const
                 s += QStringLiteral("  [%1]").arg(r->threadSize);
             return s;
         }
-        case ColCorrespondent:
+        case Column::Correspondent:
             return m_showRecipients ? r->to : r->from;
-        case ColDate:
+        case Column::From:
+            return r->from;
+        case Column::To:
+            return r->to;
+        case Column::Date:
             return formatDate(r->date);
-        case ColFlag:
+        case Column::Size:
+            return QLocale().formattedDataSize(r->size, 0);
+        case Column::Flag:
             // Glyphs when the icon theme has no mail icons (e.g. bare WMs).
             if (!QIcon::hasThemeIcon(QStringLiteral("mail-unread"))) {
                 if (r->flagged)
@@ -121,7 +139,7 @@ QVariant MessageListModel::data(const QModelIndex &index, int role) const
                     return QStringLiteral("↩");
             }
             return {};
-        case ColAttachment:
+        case Column::Attachment:
             if (!QIcon::hasThemeIcon(QStringLiteral("mail-attachment"))) {
                 if (r->encrypted)
                     return QStringLiteral("🔒");
@@ -133,7 +151,7 @@ QVariant MessageListModel::data(const QModelIndex &index, int role) const
             return {};
         }
     case Qt::DecorationRole:
-        if (col == ColFlag) {
+        if (col == Column::Flag) {
             if (r->flagged)
                 return QIcon::fromTheme(QStringLiteral("flag"), QIcon::fromTheme(QStringLiteral("emblem-important")));
             if (r->unread)
@@ -141,7 +159,7 @@ QVariant MessageListModel::data(const QModelIndex &index, int role) const
             if (r->answered)
                 return QIcon::fromTheme(QStringLiteral("mail-replied"));
         }
-        if (col == ColAttachment) {
+        if (col == Column::Attachment) {
             if (r->encrypted)
                 return QIcon::fromTheme(QStringLiteral("document-encrypted"));
             if (r->hasAttachments)
@@ -156,20 +174,24 @@ QVariant MessageListModel::data(const QModelIndex &index, int role) const
         }
         return {};
     case Qt::TextAlignmentRole:
-        if (col == ColFlag || col == ColAttachment)
+        if (col == Column::Flag || col == Column::Attachment)
             return Qt::AlignCenter;
+        if (col == Column::Size)
+            return QVariant::fromValue(Qt::AlignRight | Qt::AlignVCenter);
         return {};
     case Qt::ForegroundRole:
-        if (r->flagged && (col == ColSubject || col == ColFlag))
+        if (r->flagged && (col == Column::Subject || col == Column::Flag))
             return QColor(0xc0, 0x39, 0x2b);
         return {};
     case Qt::ToolTipRole:
-        if (col == ColDate)
+        if (col == Column::Date)
             return QLocale().toString(QDateTime::fromSecsSinceEpoch(r->date).toLocalTime(), QLocale::LongFormat);
-        if (col == ColSubject)
+        if (col == Column::Subject)
             return r->subject;
-        if (col == ColCorrespondent)
+        if (col == Column::Correspondent || col == Column::From || col == Column::To)
             return tr("From: %1\nTo: %2").arg(r->from, r->to);
+        if (col == Column::Size)
+            return QLocale().toString(r->size);
         return {};
     default:
         return {};
@@ -178,25 +200,38 @@ QVariant MessageListModel::data(const QModelIndex &index, int role) const
 
 QVariant MessageListModel::headerData(int section, Qt::Orientation orientation, int role) const
 {
-    if (orientation != Qt::Horizontal)
+    if (orientation != Qt::Horizontal || section < 0 || section >= m_columns.size())
         return {};
+    const Column col = m_columns[section];
     if (role == Qt::DisplayRole) {
-        switch (section) {
-        case ColSubject:
+        switch (col) {
+        case Column::Subject:
             return tr("Subject");
-        case ColCorrespondent:
+        case Column::Correspondent:
             return m_showRecipients ? tr("To") : tr("From");
-        case ColDate:
+        case Column::From:
+            return tr("From");
+        case Column::To:
+            return tr("To");
+        case Column::Date:
             return tr("Date");
+        case Column::Size:
+            return tr("Size");
         default:
             return {};
         }
     }
     if (role == Qt::DecorationRole) {
-        if (section == ColFlag)
+        if (col == Column::Flag)
             return QIcon::fromTheme(QStringLiteral("flag"));
-        if (section == ColAttachment)
+        if (col == Column::Attachment)
             return QIcon::fromTheme(QStringLiteral("mail-attachment"));
+    }
+    if (role == Qt::ToolTipRole) {
+        if (col == Column::Flag)
+            return tr("Flagged, unread or answered");
+        if (col == Column::Attachment)
+            return tr("Attachments or encrypted");
     }
     return {};
 }

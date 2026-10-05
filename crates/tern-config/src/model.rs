@@ -16,6 +16,8 @@ pub struct GlobalConfig {
     pub gpg: GpgConfig,
     pub compose: ComposeConfig,
     pub memory: MemoryConfig,
+    /// Default Sent folder for all profiles (see `AccountConfig`).
+    pub sent_folder: Option<String>,
 }
 
 /// `[memory]` in tern.toml.
@@ -54,12 +56,68 @@ pub struct UiConfig {
     pub prefer_plain_text: bool,
     /// Show message lists threaded (JWZ) instead of flat.
     pub threaded: bool,
+    pub message_list: MessageListConfig,
 }
 
 impl Default for UiConfig {
     fn default() -> Self {
-        Self { prefer_plain_text: false, threaded: true }
+        Self { prefer_plain_text: false, threaded: true, message_list: MessageListConfig::default() }
     }
+}
+
+/// `[ui.message_list]` in tern.toml.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+pub struct MessageListConfig {
+    /// Columns shown, left to right.
+    pub columns: Vec<ListField>,
+    /// Sort key. It doesn't need to be a shown column. In threaded mode it
+    /// orders whole threads (by their newest message for `date`, by the
+    /// first message otherwise); messages inside a thread stay chronological.
+    pub sort_by: ListField,
+    pub sort_order: SortOrder,
+}
+
+impl Default for MessageListConfig {
+    fn default() -> Self {
+        Self {
+            columns: vec![
+                ListField::Flag,
+                ListField::Subject,
+                ListField::Correspondent,
+                ListField::Date,
+                ListField::Attachment,
+            ],
+            sort_by: ListField::Date,
+            sort_order: SortOrder::Desc,
+        }
+    }
+}
+
+/// A message list column, also usable as sort key.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum ListField {
+    /// Flagged / unread / answered state. Sorts flagged first, then unread
+    /// (with `desc`).
+    Flag,
+    Subject,
+    From,
+    To,
+    /// From, or To in Sent and Drafts folders.
+    Correspondent,
+    Date,
+    /// Attachment / encrypted marker.
+    Attachment,
+    Size,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SortOrder {
+    Asc,
+    #[default]
+    Desc,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -88,6 +146,11 @@ pub struct ProfileConfig {
     pub remote_content: RemoteContentConfig,
     /// Default archive folder pattern for all accounts (see `AccountConfig`).
     pub archive: Option<String>,
+    /// Default Sent folder for all accounts (see `AccountConfig`).
+    pub sent_folder: Option<String>,
+    /// Account ids (file names without `.toml`) in the order they are shown.
+    /// Accounts not listed follow, sorted by id.
+    pub account_order: Vec<String>,
     pub compose: ComposeConfig,
 }
 
@@ -140,6 +203,10 @@ pub struct AccountConfig {
     /// `{month}` come from the message date; `/` separates levels. Without
     /// it (here or in profile.toml), archiving is disabled.
     pub archive: Option<String>,
+    /// Folder that receives copies of sent mail, e.g. `"Sent Items"`; `/`
+    /// separates levels. Created if missing. Without it (here, in
+    /// profile.toml or in tern.toml), the server's `\Sent` folder is used.
+    pub sent_folder: Option<String>,
     #[serde(default)]
     pub compose: ComposeConfig,
 }

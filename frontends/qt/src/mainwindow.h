@@ -36,6 +36,9 @@ private:
     void createActions();
     void restoreState();
     void saveState();
+    // Columns and sort indicator from the config; true if anything changed.
+    bool applyListLayout();
+    void saveListHeader();
 
     void refreshFolders();
     void folderSelected();
@@ -86,6 +89,9 @@ private:
     bool m_threaded = true;
     bool m_initialSelectionDone = false;
     bool m_restoring = false;
+    bool m_layoutApplied = false;
+    ffi::ListColumn m_sortBy = ffi::ListColumn::Date;
+    Qt::SortOrder m_sortOrder = Qt::DescendingOrder;
 
     QAction *m_replyAct = nullptr;
     QAction *m_replyAllAct = nullptr;

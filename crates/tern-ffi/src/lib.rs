@@ -101,6 +101,24 @@ mod ffi {
     }
 
     #[repr(u8)]
+    enum ListColumn {
+        Flag,
+        Subject,
+        From,
+        To,
+        Correspondent,
+        Date,
+        Attachment,
+        Size,
+    }
+
+    struct ListLayout {
+        columns: Vec<ListColumn>,
+        sort_by: ListColumn,
+        descending: bool,
+    }
+
+    #[repr(u8)]
     enum ReplyMode {
         Reply,
         ReplyAll,
@@ -178,6 +196,7 @@ mod ffi {
         fn accounts(self: &App) -> Vec<AccountInfo>;
         fn prefer_plain_text(self: &App) -> bool;
         fn threaded_by_default(self: &App) -> bool;
+        fn list_layout(self: &App) -> ListLayout;
 
         fn folder_tree(self: &App) -> Vec<FolderNode>;
         fn open_list(self: &App, account: &str, folder: i64, threaded: bool, query: &str) -> u32;
@@ -453,6 +472,25 @@ impl App {
 
     fn threaded_by_default(&self) -> bool {
         self.0.threaded_by_default()
+    }
+
+    fn list_layout(&self) -> ListLayout {
+        let column = |c: app::ListColumn| match c {
+            app::ListColumn::Flag => ListColumn::Flag,
+            app::ListColumn::Subject => ListColumn::Subject,
+            app::ListColumn::From => ListColumn::From,
+            app::ListColumn::To => ListColumn::To,
+            app::ListColumn::Correspondent => ListColumn::Correspondent,
+            app::ListColumn::Date => ListColumn::Date,
+            app::ListColumn::Attachment => ListColumn::Attachment,
+            app::ListColumn::Size => ListColumn::Size,
+        };
+        let l = self.0.list_layout();
+        ListLayout {
+            columns: l.columns.into_iter().map(column).collect(),
+            sort_by: column(l.sort_by),
+            descending: l.descending,
+        }
     }
 
     fn folder_tree(&self) -> Vec<FolderNode> {

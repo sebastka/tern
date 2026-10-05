@@ -48,6 +48,9 @@ pub struct AccountRt {
     pub store: Arc<Store>,
     pub blobs: Arc<BlobStore>,
     pub outbox: Outbox,
+    /// Configured Sent folder (`sent_folder`, `/`-separated), resolved over
+    /// account, profile and tern.toml. Kept current on config reloads.
+    pub sent_folder: Mutex<Option<String>>,
     tx: mpsc::UnboundedSender<Request>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
 }
@@ -55,6 +58,20 @@ pub struct AccountRt {
 impl AccountRt {
     pub fn request(&self, r: Request) {
         let _ = self.tx.send(r);
+    }
+
+    /// Server name of the configured Sent folder (levels joined with the
+    /// server's delimiter), if one is configured.
+    pub fn sent_folder_name(&self) -> tern_core::Result<Option<String>> {
+        let Some(name) = self.sent_folder.lock().unwrap_or_else(|p| p.into_inner()).clone() else {
+            return Ok(None);
+        };
+        Ok(Some(name.replace('/', &self.delimiter()?)))
+    }
+
+    /// The server's hierarchy delimiter (`/` until folders are known).
+    pub fn delimiter(&self) -> tern_core::Result<String> {
+        Ok(self.store.folders()?.iter().find_map(|f| f.delimiter.clone()).unwrap_or_else(|| "/".into()))
     }
 
     /// Stop all background tasks (connections are dropped).
@@ -93,6 +110,7 @@ pub fn start(
         store,
         blobs,
         outbox,
+        sent_folder: Mutex::new(None),
         tx: tx.clone(),
         tasks: Mutex::new(Vec::new()),
     });
@@ -472,11 +490,15 @@ impl Worker {
     /// Best-effort bookkeeping after a successful send: copy to Sent and mark
     /// the replied-to message.
     fn after_send(&self, meta: &tern_smtp::OutboxMeta, raw: &[u8]) -> tern_core::Result<()> {
-        if meta.save_to_sent
-            && let Some(sent) = self.acc.store.folder_by_role(FolderRole::Sent)?
-        {
-            ops::append(&self.acc.store, &self.acc.blobs, sent.id, raw, Flags::SEEN)?;
-            self.hub.folder_dirty(&self.acc.id, sent.id);
+        if meta.save_to_sent {
+            let sent = match self.acc.sent_folder_name()? {
+                Some(name) => Some(ops::ensure_folder(&self.acc.store, &name, Some(&self.acc.delimiter()?))?),
+                None => self.acc.store.folder_by_role(FolderRole::Sent)?.map(|f| f.id),
+            };
+            if let Some(sent) = sent {
+                ops::append(&self.acc.store, &self.acc.blobs, sent, raw, Flags::SEEN)?;
+                self.hub.folder_dirty(&self.acc.id, sent);
+            }
         }
         if let Some(m) = meta.reply_to_message {
             ops::set_flags(&self.acc.store, &[m], Flags::ANSWERED, Flags::empty())?;

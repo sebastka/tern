@@ -92,7 +92,7 @@ display_name = "Sebastian"          # optional, defaults to profile.toml
 [imap]
 host = "posteo.de"
 port = 993                          # optional: 993 implicit / 143 starttls
-tls = "implicit"                    # implicit | starttls
+tls = "implicit"                    # implicit | starttls | insecure-plaintext (see below)
 username = "me@posteo.de"
 password.command = "pass show mail/posteo"
 
@@ -110,14 +110,18 @@ sign_by_default = false
 encrypt_when_possible = true
 
 [sync]                              # optional
-poll_interval_secs = 300            # folders without IDLE
+poll_interval_secs = 300            # folders without IDLE; at least 30
 idle_folders = ["Lists/work"]       # IDLE on these as well as INBOX
 exclude_folders = ["Spam"]          # never synced
 
 [compose]                           # optional, overrides profile.toml / tern.toml
 format = "markdown"                 # plain | markdown | html
-signature = "signatures/posteo.md"  # .txt, .md or .html, relative to ~/.config/tern/
+signature = "signatures/posteo.md"  # .txt, .md or .html, relative to ~/.config/tern/; max 64 KiB
 ```
+
+`tls = "insecure-plaintext"` turns TLS off completely. It is meant for local
+test servers only and is rejected unless `host` is `localhost` or a loopback
+address.
 
 `archive` is a top-level key (put it above `[imap]`): the folder the Archive
 action moves messages to. `{year}` and `{month}` are taken from each message's
@@ -127,6 +131,15 @@ that account:
 
 ```toml
 archive = "Archive/{year}"
+```
+
+`sent_folder` (also top-level) is where copies of sent mail go, with `/`
+between levels. Missing folders are created. Without it, Tern uses the folder
+the server marks as Sent. It can also be set in profile.toml or tern.toml; the
+most specific setting wins:
+
+```toml
+sent_folder = "INBOX/Sent Items"
 ```
 
 Plaintext passwords are not accepted. Use one of these:
@@ -140,6 +153,7 @@ Plaintext passwords are not accepted. Use one of these:
 
 ```toml
 display_name = "Sebastian"
+account_order = ["work", "posteo"]  # account file names; unlisted accounts follow, A–Z
 
 [pgp]                               # default for all accounts of the profile
 key = "0xDEADBEEFCAFEBABE"
@@ -147,7 +161,7 @@ sign_by_default = true
 
 [store]
 compress = true                     # zstd-compress stored messages
-compression_level = 3
+compression_level = 3               # 1–19
 
 [remote_content]
 allow_senders = ["news@lwn.net", "@example.org"]   # load remote images for these
@@ -157,8 +171,11 @@ format = "plain"
 signature = "signatures/me.txt"
 ```
 
-`archive = "Archive/{year}"` can also be set here (top-level) as a default
-for all accounts.
+`archive = "Archive/{year}"` and `sent_folder` can also be set here
+(top-level) as defaults for all accounts.
+
+`account_order` sets the order of accounts in the folder tree. The first
+account is also the default for New Message when no folder is selected.
 
 ### Global (`tern.toml`, optional)
 
@@ -166,21 +183,36 @@ for all accounts.
 default_profile = "personal"
 ask_on_startup = false              # with default_profile: skip the profile picker
 
+sent_folder = "Sent"                # default for all profiles (top-level, above any [table])
+
 [ui]
 threaded = true
 prefer_plain_text = false
+
+[ui.message_list]
+# Left to right: flag, subject, from, to, correspondent, date, attachment, size.
+# "correspondent" is From, or To in Sent and Drafts folders.
+columns = ["flag", "subject", "correspondent", "date", "attachment"]   # not empty, no duplicates
+sort_by = "date"                    # any of the above; it doesn't have to be shown
+sort_order = "desc"                 # asc | desc
 
 [gpg]
 program = "gpg"
 wkd_lookup = false                  # look up missing recipient keys via WKD
 
 [compose]
-format = "plain"                    # default editor: plain | markdown | html
+format = "plain"                    # default editor: plain | markdown | html (no signature here)
 
 [memory]
-message_cache_mb = 64               # rendered messages kept in memory, attachments included
+message_cache_mb = 64               # rendered messages kept in memory, attachments included; 1–4096
 spare_renderer = true               # keep a spare web renderer ready (newer Qt only; restart to apply)
 ```
+
+In threaded view, `sort_by` orders whole threads. Numeric fields (date, size,
+flag, attachment) use the thread's highest value, so `date` means the newest
+message and `flag` lifts a thread with any flagged or unread message. Text
+fields use the thread's first message. Messages inside a thread stay in date
+order. Subjects sort without their `Re:`/`Fwd:`/`SV:` prefixes.
 
 ### Composing
 
