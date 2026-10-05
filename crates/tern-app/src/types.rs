@@ -47,6 +47,30 @@ pub struct FolderNode {
     pub total: u32,
 }
 
+/// A message list column (and sort key), from `[ui.message_list]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ListColumn {
+    Flag,
+    Subject,
+    From,
+    To,
+    /// From, or To in Sent and Drafts folders.
+    Correspondent,
+    Date,
+    Attachment,
+    Size,
+}
+
+/// Message list columns and order, as configured.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListLayout {
+    /// Left to right.
+    pub columns: Vec<ListColumn>,
+    /// May be a column that isn't shown.
+    pub sort_by: ListColumn,
+    pub descending: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageRow {
     pub key: MessageKey,

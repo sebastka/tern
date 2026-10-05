@@ -60,13 +60,8 @@ MainWindow::MainWindow(const QString &profile, QWidget *parent) : QMainWindow(pa
     m_list->setDragDropMode(QAbstractItemView::DragOnly);
     m_list->setTextElideMode(Qt::ElideRight);
     m_list->header()->setStretchLastSection(false);
-    m_list->header()->setSectionResizeMode(MessageListModel::ColFlag, QHeaderView::Fixed);
-    m_list->header()->setSectionResizeMode(MessageListModel::ColAttachment, QHeaderView::Fixed);
-    m_list->header()->setSectionResizeMode(MessageListModel::ColSubject, QHeaderView::Stretch);
-    m_list->header()->resizeSection(MessageListModel::ColFlag, 28);
-    m_list->header()->resizeSection(MessageListModel::ColAttachment, 28);
-    m_list->header()->resizeSection(MessageListModel::ColCorrespondent, 220);
-    m_list->header()->resizeSection(MessageListModel::ColDate, 130);
+    // Column order comes from the config (`[ui.message_list]`).
+    m_list->header()->setSectionsMovable(false);
     connect(m_list->selectionModel(), &QItemSelectionModel::currentChanged, this, &MainWindow::messageActivated);
     connect(m_list->selectionModel(), &QItemSelectionModel::selectionChanged, this, &MainWindow::updateActions);
 
@@ -102,6 +97,7 @@ MainWindow::MainWindow(const QString &profile, QWidget *parent) : QMainWindow(pa
     m_threaded = core().threaded_by_default();
     createActions();
     restoreState();
+    applyListLayout();
 
     EventBridge *b = bridge();
     connect(b, &EventBridge::folderTreeChanged, this, &MainWindow::refreshFolders);
@@ -244,7 +240,6 @@ void MainWindow::restoreState()
     QMainWindow::restoreState(m_settings->value(QStringLiteral("windowState")).toByteArray());
     m_hsplit->restoreState(m_settings->value(QStringLiteral("hsplit")).toByteArray());
     m_vsplit->restoreState(m_settings->value(QStringLiteral("vsplit")).toByteArray());
-    m_list->header()->restoreState(m_settings->value(QStringLiteral("listHeader")).toByteArray());
     if (m_settings->contains(QStringLiteral("threaded"))) {
         m_threaded = m_settings->value(QStringLiteral("threaded")).toBool();
         m_threadedAct->setChecked(m_threaded);
@@ -259,10 +254,119 @@ void MainWindow::saveState()
     m_settings->setValue(QStringLiteral("windowState"), QMainWindow::saveState());
     m_settings->setValue(QStringLiteral("hsplit"), m_hsplit->saveState());
     m_settings->setValue(QStringLiteral("vsplit"), m_vsplit->saveState());
-    m_settings->setValue(QStringLiteral("listHeader"), m_list->header()->saveState());
+    saveListHeader();
     m_settings->setValue(QStringLiteral("threaded"), m_threaded);
     m_settings->setValue(QStringLiteral("lastFolderAccount"), m_folder.account);
     m_settings->setValue(QStringLiteral("lastFolder"), m_folder.folder);
+}
+
+static QString columnName(MessageListModel::Column c)
+{
+    using C = MessageListModel::Column;
+    switch (c) {
+    case C::Flag:
+        return QStringLiteral("flag");
+    case C::Subject:
+        return QStringLiteral("subject");
+    case C::From:
+        return QStringLiteral("from");
+    case C::To:
+        return QStringLiteral("to");
+    case C::Correspondent:
+        return QStringLiteral("correspondent");
+    case C::Date:
+        return QStringLiteral("date");
+    case C::Attachment:
+        return QStringLiteral("attachment");
+    case C::Size:
+        return QStringLiteral("size");
+    default:
+        return QStringLiteral("unknown");
+    }
+}
+
+// Column widths are kept per column set, so switching layouts in the config
+// and back restores them.
+static QString headerKey(const QList<MessageListModel::Column> &columns)
+{
+    QStringList names;
+    for (const auto c : columns)
+        names << columnName(c);
+    return QStringLiteral("listHeader/") + names.join(u'-');
+}
+
+void MainWindow::saveListHeader()
+{
+    if (!m_listModel->columns().isEmpty())
+        m_settings->setValue(headerKey(m_listModel->columns()), m_list->header()->saveState());
+}
+
+bool MainWindow::applyListLayout()
+{
+    using C = MessageListModel::Column;
+    const ffi::ListLayout layout = core().list_layout();
+    QList<C> columns;
+    for (const auto c : layout.columns)
+        columns << c;
+    const auto order = layout.descending ? Qt::DescendingOrder : Qt::AscendingOrder;
+    const bool sameColumns = m_layoutApplied && columns == m_listModel->columns();
+    if (sameColumns && layout.sort_by == m_sortBy && order == m_sortOrder)
+        return false;
+
+    QHeaderView *h = m_list->header();
+    if (!sameColumns) {
+        if (m_layoutApplied)
+            saveListHeader();
+        m_listModel->setColumns(columns);
+        for (int i = 0; i < columns.size(); ++i) {
+            switch (columns[i]) {
+            case C::Flag:
+            case C::Attachment:
+                h->setSectionResizeMode(i, QHeaderView::Fixed);
+                h->resizeSection(i, 28);
+                break;
+            case C::Subject:
+                h->setSectionResizeMode(i, QHeaderView::Stretch);
+                break;
+            case C::Date:
+                h->setSectionResizeMode(i, QHeaderView::Interactive);
+                h->resizeSection(i, 130);
+                break;
+            case C::Size:
+                h->setSectionResizeMode(i, QHeaderView::Interactive);
+                h->resizeSection(i, 80);
+                break;
+            default:
+                h->setSectionResizeMode(i, QHeaderView::Interactive);
+                h->resizeSection(i, 220);
+                break;
+            }
+        }
+        QVariant saved = m_settings->value(headerKey(columns));
+        // Before columns were configurable, the (then fixed) default layout
+        // was saved under "listHeader".
+        if (!saved.isValid() && headerKey(columns) == u"listHeader/flag-subject-correspondent-date-attachment")
+            saved = m_settings->value(QStringLiteral("listHeader"));
+        if (saved.isValid())
+            h->restoreState(saved.toByteArray());
+        // The config decides which columns show and in what order, whatever
+        // the saved state says.
+        h->setSectionsMovable(false);
+        for (int i = 0; i < columns.size(); ++i) {
+            h->setSectionHidden(i, false);
+            h->moveSection(h->visualIndex(i), i);
+        }
+    }
+
+    m_sortBy = layout.sort_by;
+    m_sortOrder = order;
+    m_layoutApplied = true;
+    // Only an indicator: the order is set in the config, so clicking a
+    // header does nothing.
+    const int sortSection = m_listModel->sectionOf(m_sortBy);
+    h->setSortIndicatorShown(sortSection >= 0);
+    h->setSortIndicator(sortSection, order);
+    return true;
 }
 
 void MainWindow::closeEvent(QCloseEvent *event)
@@ -376,7 +480,8 @@ void MainWindow::listChanged(quint32 count)
 
 void MainWindow::selectRow(int row, bool open)
 {
-    const QModelIndex idx = m_listModel->index(row, MessageListModel::ColSubject);
+    const int column = qMax(0, m_listModel->sectionOf(MessageListModel::Column::Subject));
+    const QModelIndex idx = m_listModel->index(row, column);
     m_restoring = !open;
     m_list->selectionModel()->setCurrentIndex(idx, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
     m_restoring = false;
@@ -573,6 +678,9 @@ void MainWindow::progress(const QString &account, const QString &folder, quint32
 
 void MainWindow::configChanged(const QStringList &issues)
 {
+    // New columns or sort order: the core sorts when the list is opened.
+    if (applyListLayout() && !m_folder.account.isEmpty())
+        reopenList();
     updateActions();
     m_issues = issues;
     m_issuesButton->setVisible(!issues.isEmpty());

@@ -100,6 +100,22 @@ pub struct ThreadInput {
     pub references: Vec<String>,
 }
 
+/// Sortable fields of a message (see [`Store::sort_inputs`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SortInput {
+    pub id: MessageId,
+    pub date: i64,
+    pub subject: String,
+    /// Senders as indexed for search: first name (or address) first.
+    pub from: String,
+    /// To and Cc recipients, same format.
+    pub to: String,
+    pub size: u32,
+    pub flags: Flags,
+    pub has_attachments: bool,
+    pub encrypted: bool,
+}
+
 pub struct Store {
     conn: Mutex<Connection>,
 }
@@ -407,6 +423,32 @@ impl Store {
                     message_id: r.get(3)?,
                     in_reply_to: r.get(4)?,
                     references: refs.split_whitespace().map(str::to_owned).collect(),
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(v)
+    }
+
+    /// The fields message lists can be sorted by, for all messages of a
+    /// folder.
+    pub fn sort_inputs(&self, folder: FolderId) -> Result<Vec<SortInput>> {
+        let conn = self.conn();
+        let mut st = conn.prepare(
+            "SELECT id, date, subject, from_text, to_text, size, flags, has_attachments, encrypted FROM messages
+             WHERE folder_id = ?1 AND (flags & 8) = 0",
+        )?;
+        let v = st
+            .query_map([folder], |r| {
+                Ok(SortInput {
+                    id: r.get(0)?,
+                    date: r.get(1)?,
+                    subject: r.get(2)?,
+                    from: r.get(3)?,
+                    to: r.get(4)?,
+                    size: r.get(5)?,
+                    flags: Flags(r.get(6)?),
+                    has_attachments: r.get(7)?,
+                    encrypted: r.get(8)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;

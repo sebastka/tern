@@ -29,10 +29,17 @@ struct Row {
 class MessageListModel : public QAbstractTableModel {
     Q_OBJECT
 public:
-    enum Column { ColFlag, ColSubject, ColCorrespondent, ColDate, ColAttachment, ColumnCount };
+    using Column = ffi::ListColumn;
     static constexpr auto MimeType = "application/x-tern-message-keys";
 
     explicit MessageListModel(QObject *parent = nullptr);
+
+    // Columns from `[ui.message_list]`, left to right.
+    void setColumns(const QList<Column> &columns);
+    QList<Column> columns() const { return m_columns; }
+    Column columnAt(int section) const { return m_columns.value(section, Column::Subject); }
+    // Section showing `column`, or -1.
+    int sectionOf(Column column) const { return static_cast<int>(m_columns.indexOf(column)); }
 
     // Switch to a folder (empty account = no list).
     void open(const QString &account, qint64 folder, bool threaded, const QString &query, bool showRecipients);
@@ -59,6 +66,7 @@ private:
 
     quint32 m_count = 0;
     bool m_showRecipients = false;
+    QList<Column> m_columns{Column::Flag, Column::Subject, Column::Correspondent, Column::Date, Column::Attachment};
     // page index → rows. Mutable: filled lazily from const data().
     mutable QHash<int, QList<Row>> m_pages;
     mutable QList<int> m_pageOrder; // LRU, most recent last

@@ -19,8 +19,20 @@ fn role_rank(role: Option<FolderRole>) -> u8 {
     }
 }
 
-/// Append one account's subtree (pre-order) to `out`.
-pub fn append_account(out: &mut Vec<FolderNode>, account: &str, name: &str, folders: &[Folder]) {
+/// Append one account's subtree (pre-order) to `out`. `sent` is the
+/// configured Sent folder (server name), shown with the `sent` role.
+pub fn append_account(out: &mut Vec<FolderNode>, account: &str, name: &str, folders: &[Folder], sent: Option<&str>) {
+    let folders: Vec<Folder> = folders
+        .iter()
+        .cloned()
+        .map(|mut f| {
+            if sent == Some(f.name.as_str()) {
+                f.role = Some(FolderRole::Sent);
+            }
+            f
+        })
+        .collect();
+    let folders = folders.as_slice();
     let root = out.len() as i32;
     out.push(FolderNode {
         account: account.into(),
@@ -111,20 +123,22 @@ mod tests {
             f(6, "orphan/child", None),
         ];
         let mut out = Vec::new();
-        append_account(&mut out, "acc", "Account", &folders);
+        append_account(&mut out, "acc", "Account", &folders, Some("lists"));
         let names: Vec<(&str, u32, i32)> = out.iter().map(|n| (n.name.as_str(), n.depth, n.parent)).collect();
         assert_eq!(
             names,
             vec![
                 ("Account", 0, -1),
                 ("INBOX", 1, 0),
+                ("lists", 1, 0),
                 ("Archive", 1, 0),
-                ("2024", 2, 2),
+                ("2024", 2, 3),
                 ("Trash", 1, 0),
                 ("child", 1, 0),
-                ("lists", 1, 0),
             ]
         );
         assert_eq!(out[0].unread, 3);
+        // The configured Sent folder ranks and shows as Sent.
+        assert_eq!(out[2].role, "sent");
     }
 }

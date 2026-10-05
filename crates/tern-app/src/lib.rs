@@ -14,6 +14,7 @@ pub mod format;
 mod hub;
 mod logging;
 pub mod render;
+mod sort;
 mod tree;
 pub mod types;
 
@@ -49,10 +50,23 @@ struct ProfileState {
     name: String,
     config: Option<Profile>,
     accounts: Vec<Arc<AccountRt>>,
+    /// Problems in the profile's files.
     issues: Vec<String>,
+    /// Problems in tern.toml.
+    global_issues: Vec<String>,
     _lock: ProfileLock,
     _watcher: Option<ConfigWatcher>,
     _dbus: Option<zbus::Connection>,
+}
+
+impl ProfileState {
+    fn all_issues(&self) -> Vec<String> {
+        self.global_issues.iter().chain(&self.issues).cloned().collect()
+    }
+}
+
+fn issue_strings(e: &tern_config::ConfigErrors) -> Vec<String> {
+    e.0.iter().map(|i| i.to_string()).collect()
 }
 
 impl Drop for ProfileState {
@@ -181,8 +195,10 @@ impl App {
 
         let (config, issues) = match tern_config::load_profile(&inner.dirs.config, name) {
             Ok(p) => (Some(p), Vec::new()),
-            Err(e) => (None, e.0.iter().map(|i| i.to_string()).collect()),
+            Err(e) => (None, issue_strings(&e)),
         };
+        let global_issues =
+            tern_config::load_global(&inner.dirs.config).err().map(|e| issue_strings(&e)).unwrap_or_default();
         let accounts = config.as_ref().map(|p| inner.start_accounts(p, &[])).unwrap_or_default();
 
         let weak = Arc::downgrade(inner);
@@ -203,15 +219,18 @@ impl App {
             .map_err(|e| warn!("D-Bus single-instance service unavailable: {e}"))
             .ok();
 
-        *lock(&inner.profile) = Some(ProfileState {
+        let state = ProfileState {
             name: name.to_owned(),
             config,
             accounts,
-            issues: issues.clone(),
+            issues,
+            global_issues,
             _lock: profile_lock,
             _watcher: watcher,
             _dbus: dbus,
-        });
+        };
+        let issues = state.all_issues();
+        *lock(&inner.profile) = Some(state);
         info!(profile = name, "profile opened");
         inner.hub.emit(Event::ConfigChanged { issues });
         inner.hub.emit(Event::FolderTreeChanged);
@@ -234,7 +253,7 @@ impl App {
     }
 
     pub fn config_issues(&self) -> Vec<String> {
-        lock(&self.inner.profile).as_ref().map(|p| p.issues.clone()).unwrap_or_default()
+        lock(&self.inner.profile).as_ref().map(ProfileState::all_issues).unwrap_or_default()
     }
 
     pub fn accounts(&self) -> Vec<AccountInfo> {
@@ -269,20 +288,34 @@ impl App {
         self.inner.global.read().unwrap_or_else(|p| p.into_inner()).ui.threaded
     }
 
+    /// Message list columns and sort order (`[ui.message_list]`). Re-read
+    /// on `Event::ConfigChanged`.
+    pub fn list_layout(&self) -> ListLayout {
+        let g = self.inner.global.read().unwrap_or_else(|p| p.into_inner());
+        let l = &g.ui.message_list;
+        ListLayout {
+            columns: l.columns.iter().map(|&c| c.into()).collect(),
+            sort_by: l.sort_by.into(),
+            descending: l.sort_order == tern_config::SortOrder::Desc,
+        }
+    }
+
     // ------------------------------------------------------------ read models
 
+    /// Accounts in the configured order (`account_order`).
     pub fn folder_tree(&self) -> Vec<FolderNode> {
         let mut out = Vec::new();
         for acc in self.inner.accounts() {
             let folders = acc.store.folders().unwrap_or_default();
-            tree::append_account(&mut out, &acc.id, &acc.config.config.name, &folders);
+            let sent = acc.sent_folder_name().ok().flatten();
+            tree::append_account(&mut out, &acc.id, &acc.config.config.name, &folders, sent.as_deref());
         }
         out
     }
 
     /// Make `folder` the current message list. An empty `query` lists all
-    /// messages, otherwise search results (newest first, flat). Returns the
-    /// row count.
+    /// messages, otherwise search results (flat). Rows are in the configured
+    /// order. Returns the row count.
     pub fn open_list(&self, folder: FolderKey, threaded: bool, query: &str) -> u32 {
         let mut l = lock(&self.inner.list);
         l.folder = Some(folder);
@@ -515,6 +548,14 @@ impl Drop for App {
     }
 }
 
+/// Does the folder hold outgoing mail (Sent, Drafts or the configured Sent
+/// folder)? Same rule as the `sent`/`drafts` roles in the folder tree.
+fn is_outgoing(acc: &AccountRt, folder: i64) -> bool {
+    let Ok(Some(f)) = acc.store.folder(folder) else { return false };
+    matches!(f.role, Some(tern_core::FolderRole::Sent | tern_core::FolderRole::Drafts))
+        || acc.sent_folder_name().ok().flatten().as_deref() == Some(f.name.as_str())
+}
+
 fn group_by_account(keys: &[MessageKey]) -> BTreeMap<String, Vec<MessageKey>> {
     let mut map: BTreeMap<String, Vec<MessageKey>> = BTreeMap::new();
     for k in keys {
@@ -541,7 +582,7 @@ impl Inner {
     /// configuration is unchanged.
     fn start_accounts(&self, profile: &Profile, keep: &[Arc<AccountRt>]) -> Vec<Arc<AccountRt>> {
         let data = self.dirs.profile_data(&profile.name);
-        profile
+        let accounts: Vec<Arc<AccountRt>> = profile
             .accounts
             .iter()
             .filter_map(|a| {
@@ -556,21 +597,42 @@ impl Inner {
                     }
                 }
             })
-            .collect()
+            .collect();
+        self.apply_inherited_settings(profile, &accounts);
+        accounts
+    }
+
+    /// Settings an account inherits from profile.toml or tern.toml, which
+    /// can change without the account being restarted.
+    fn apply_inherited_settings(&self, profile: &Profile, accounts: &[Arc<AccountRt>]) {
+        let global = self.global_config();
+        for acc in accounts {
+            let sent = profile.account(&acc.id).and_then(|a| a.sent_folder(&profile.config, &global));
+            *lock(&acc.sent_folder) = sent.map(str::to_owned);
+        }
     }
 
     /// Hot reload: keep the last valid config on errors (§5).
     fn reload(&self) {
-        if let Ok(g) = tern_config::load_global(&self.dirs.config) {
-            *self.global.write().unwrap_or_else(|p| p.into_inner()) = g;
-        }
+        let (global_changed, global_issues) = match tern_config::load_global(&self.dirs.config) {
+            Ok(g) => {
+                let mut current = self.global.write().unwrap_or_else(|p| p.into_inner());
+                let changed = *current != g;
+                *current = g;
+                (changed, Vec::new())
+            }
+            Err(e) => {
+                warn!("tern.toml has errors, keeping the previous version");
+                (false, issue_strings(&e))
+            }
+        };
         let mut guard = lock(&self.profile);
         let Some(state) = guard.as_mut() else { return };
+        let mut changed = global_changed || state.global_issues != global_issues;
+        state.global_issues = global_issues;
         match tern_config::load_profile(&self.dirs.config, &state.name) {
-            Ok(profile) => {
-                if state.config.as_ref() == Some(&profile) && state.issues.is_empty() {
-                    return;
-                }
+            Ok(profile) if state.config.as_ref() != Some(&profile) || !state.issues.is_empty() => {
+                // Uses the new tern.toml too.
                 let new = self.start_accounts(&profile, &state.accounts);
                 for old in &state.accounts {
                     if !new.iter().any(|n| Arc::ptr_eq(n, old)) {
@@ -581,18 +643,25 @@ impl Inner {
                 state.config = Some(profile);
                 state.issues.clear();
                 info!("configuration reloaded");
-                drop(guard);
-                self.hub.emit(Event::ConfigChanged { issues: Vec::new() });
-                self.hub.emit(Event::FolderTreeChanged);
+                changed = true;
             }
+            Ok(_) => {}
             Err(e) => {
-                state.issues = e.0.iter().map(|i| i.to_string()).collect();
-                let issues = state.issues.clone();
-                drop(guard);
+                state.issues = issue_strings(&e);
                 warn!("configuration has errors, keeping the previous one");
-                self.hub.emit(Event::ConfigChanged { issues });
+                changed = true;
             }
         }
+        if !changed {
+            return;
+        }
+        if global_changed && let Some(profile) = &state.config {
+            self.apply_inherited_settings(profile, &state.accounts);
+        }
+        let issues = state.all_issues();
+        drop(guard);
+        self.hub.emit(Event::ConfigChanged { issues });
+        self.hub.emit(Event::FolderTreeChanged);
     }
 
     fn recompute_list(&self, l: &mut ListState) {
@@ -604,11 +673,30 @@ impl Inner {
             l.rows.clear();
             return;
         };
-        let flat = |ids: Vec<i64>| ids.into_iter().map(|id| ThreadRow { id, depth: 0, thread_size: 0 }).collect();
+        let (field, order) = {
+            let g = self.global.read().unwrap_or_else(|p| p.into_inner());
+            (g.ui.message_list.sort_by, g.ui.message_list.sort_order)
+        };
+        // Store and threading give newest first; other orders re-sort.
+        let custom = (!sort::is_default(field, order)).then(|| {
+            let inputs = acc.store.sort_inputs(folder.folder).unwrap_or_default();
+            (inputs, is_outgoing(&acc, folder.folder))
+        });
+        let flat = |ids: Vec<i64>| {
+            let ids = match &custom {
+                Some((inputs, outgoing)) => sort::sort_flat(ids, inputs, field, order, *outgoing),
+                None => ids,
+            };
+            ids.into_iter().map(|id| ThreadRow { id, depth: 0, thread_size: 0 }).collect()
+        };
         l.rows = if !l.query.is_empty() {
             flat(acc.store.search(Some(folder.folder), &l.query, 5000).unwrap_or_default())
         } else if l.threaded {
-            tern_core::thread::thread(&acc.store.thread_inputs(folder.folder).unwrap_or_default())
+            let rows = tern_core::thread::thread(&acc.store.thread_inputs(folder.folder).unwrap_or_default());
+            match &custom {
+                Some((inputs, outgoing)) => sort::sort_threads(rows, inputs, field, order, *outgoing),
+                None => rows,
+            }
         } else {
             flat(acc.store.ids_by_date(folder.folder).unwrap_or_default())
         };

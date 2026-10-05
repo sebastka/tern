@@ -45,7 +45,7 @@ void FolderModel::refresh()
     bool sameShape = nodes.size() == m_nodes.size();
     for (qsizetype i = 0; sameShape && i < nodes.size(); ++i)
         sameShape = nodes[i].id == m_nodes[i].id && nodes[i].parent == m_nodes[i].parent
-                    && nodes[i].name == m_nodes[i].name;
+                    && nodes[i].name == m_nodes[i].name && nodes[i].role == m_nodes[i].role;
     if (sameShape) {
         for (qsizetype i = 0; i < nodes.size(); ++i) {
             if (nodes[i].unread != m_nodes[i].unread || nodes[i].total != m_nodes[i].total) {
