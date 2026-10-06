@@ -2268,6 +2268,7 @@ version = "0.1.0"
 dependencies = [
  "ammonia",
  "chrono",
+ "futures",
  "htmd",
  "html2text",
  "mail-parser",
