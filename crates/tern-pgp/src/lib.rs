@@ -192,6 +192,122 @@ pub fn parse_keys(colons: &str) -> Vec<KeyInfo> {
     keys
 }
 
+/// Where a secret (sub)key is, from field 15 of `--list-secret-keys
+/// --with-colons`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SecretLocation {
+    /// In the local keyring.
+    Local,
+    /// Only a stub: the secret part is kept offline.
+    Offline,
+    /// On a smartcard (OpenPGP card serial number, as printed on the card).
+    Card(String),
+}
+
+impl std::fmt::Display for SecretLocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Local => write!(f, "secret key on this computer"),
+            Self::Offline => write!(f, "secret key kept offline (only a stub here)"),
+            Self::Card(serial) => write!(f, "secret key on smartcard {serial}"),
+        }
+    }
+}
+
+/// The serial printed on an OpenPGP card, from its application id
+/// (`D276000124 01 0304 0006 40146786 0000` → `40146786`).
+fn card_serial(aid: &str) -> String {
+    match aid.get(20..28) {
+        Some(serial) if aid.len() == 32 && aid.starts_with("D276000124") => serial.to_owned(),
+        _ => aid.to_owned(),
+    }
+}
+
+/// One secret (sub)key from `--list-secret-keys --with-colons`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretKey {
+    /// Long key id.
+    pub key_id: String,
+    /// Its own capabilities (lowercase letters: `s`, `e`, `a`, `c`).
+    pub caps: String,
+    /// Not expired or revoked.
+    pub valid: bool,
+    pub location: SecretLocation,
+}
+
+/// Parse `sec`/`ssb` lines of a secret key listing.
+pub fn parse_secret_keys(colons: &str) -> Vec<SecretKey> {
+    colons
+        .lines()
+        .map(|l| l.split(':').collect::<Vec<_>>())
+        .filter(|f| matches!(f.first().copied(), Some("sec" | "ssb")))
+        .map(|f| {
+            let field = |i: usize| f.get(i).copied().unwrap_or("");
+            let location = match field(14) {
+                "#" => SecretLocation::Offline,
+                "" | "+" => SecretLocation::Local,
+                serial => SecretLocation::Card(card_serial(serial)),
+            };
+            SecretKey {
+                key_id: field(4).to_owned(),
+                caps: field(11).chars().filter(char::is_ascii_lowercase).collect(),
+                valid: !matches!(field(1), "e" | "r" | "d" | "i" | "n"),
+                location,
+            }
+        })
+        .collect()
+}
+
+/// What's wrong with a key configured as an account's own key (`pgp.key`).
+/// `public` and `secret` are `--list-keys` / `--list-secret-keys` colon
+/// listings for the configured key id; `email` is the account's address.
+/// Empty if the key is fine.
+pub fn own_key_problems(public: &str, secret: &str, email: &str, need_sign: bool) -> Vec<String> {
+    let mut problems = Vec::new();
+    let keys = parse_keys(public);
+    let validity = public.lines().find(|l| l.starts_with("pub:")).and_then(|l| l.split(':').nth(1)).unwrap_or("");
+    match keys.len() {
+        0 => {
+            problems.push("not found in the gpg keyring".to_owned());
+            return problems;
+        }
+        1 => {}
+        n => {
+            problems.push(format!("matches {n} keys; use the full 40-digit fingerprint"));
+            return problems;
+        }
+    }
+    let key = &keys[0];
+    match validity {
+        "e" => problems.push("the key has expired".to_owned()),
+        "r" => problems.push("the key is revoked".to_owned()),
+        "d" => problems.push("the key is disabled".to_owned()),
+        "i" | "n" => problems.push("gpg considers the key invalid".to_owned()),
+        _ => {}
+    }
+    let wanted = format!("<{}>", email.to_ascii_lowercase());
+    if !key.user_ids.iter().any(|u| u.to_ascii_lowercase().contains(&wanted)) {
+        problems.push(format!(
+            "has no user id for {email} (it has: {}); is this the key of another account?",
+            key.user_ids.join(", ")
+        ));
+    }
+    let unusable = matches!(validity, "e" | "r" | "d" | "i" | "n");
+    if !unusable && !key.can_encrypt {
+        problems.push("has no valid encryption subkey: encrypted mail can't include your own copy".to_owned());
+    }
+    let secret = parse_secret_keys(secret);
+    let usable =
+        |cap: char| secret.iter().any(|k| k.valid && k.caps.contains(cap) && k.location != SecretLocation::Offline);
+    if need_sign && !usable('s') {
+        problems.push("no usable secret signing key here, but sign_by_default = true".to_owned());
+    }
+    if !usable('e') {
+        problems.push("no usable secret encryption key here: encrypted mail to this account can't be read".to_owned());
+    }
+    problems
+}
+
 #[derive(Debug, Clone)]
 pub struct Gpg {
     program: String,
@@ -255,16 +371,54 @@ impl Gpg {
         let out = self.run(&["--decrypt"], ciphertext).await?;
         let has = |k: &str| out.status.iter().any(|s| s.keyword == k);
         if !has("DECRYPTION_OKAY") || has("DECRYPTION_FAILED") {
-            let reason = if has("NO_SECKEY") {
-                "no secret key for this message".to_owned()
-            } else if out.stderr_text.is_empty() {
-                "unknown error".to_owned()
-            } else {
-                out.stderr_text
-            };
-            return Err(PgpError::Decrypt(reason));
+            return Err(PgpError::Decrypt(self.explain_decrypt_failure(&out).await));
         }
         Ok(Decrypted { plaintext: out.stdout, signature: signature_from_status(&out.status) })
+    }
+
+    /// Which keys the message is encrypted to and where their secret keys
+    /// are (here, offline, on which smartcard), plus gpg's own message.
+    async fn explain_decrypt_failure(&self, out: &Output) -> String {
+        let mut recipients: Vec<String> = Vec::new();
+        for s in out.status.iter().filter(|s| s.keyword == "ENC_TO") {
+            let Some(id) = s.args.first() else { continue };
+            let line = if id.trim_start_matches('0').is_empty() {
+                "a hidden recipient (key id not shown)".to_owned()
+            } else {
+                let secret = match self.run(&["--list-secret-keys", id], &[]).await {
+                    Ok(o) => parse_secret_keys(&String::from_utf8_lossy(&o.stdout))
+                        .into_iter()
+                        .find(|k| k.key_id.eq_ignore_ascii_case(id)),
+                    Err(_) => None,
+                };
+                match secret {
+                    Some(SecretKey { location: SecretLocation::Card(serial), .. }) => {
+                        format!("0x{id}: secret key on smartcard {serial} (is it inserted and unlocked?)")
+                    }
+                    Some(k) => format!("0x{id}: {}", k.location),
+                    None => format!("0x{id}: no secret key for it on this computer"),
+                }
+            };
+            recipients.push(line);
+        }
+        let gpg_says = if out.stderr_text.trim().is_empty() { "unknown error" } else { out.stderr_text.trim() };
+        if recipients.is_empty() {
+            return gpg_says.to_owned();
+        }
+        format!("The message is encrypted to:\n  {}\n\ngpg: {gpg_says}", recipients.join("\n  "))
+    }
+
+    /// Check the account's own key (`pgp.key`), see [`own_key_problems`].
+    /// `Err` only if gpg can't be run at all.
+    pub async fn check_own_key(&self, key: &str, email: &str, need_sign: bool) -> Result<Vec<String>> {
+        let public = self.run(&["--list-keys", key], &[]).await?;
+        let secret = self.run(&["--list-secret-keys", key], &[]).await?;
+        Ok(own_key_problems(
+            &String::from_utf8_lossy(&public.stdout),
+            &String::from_utf8_lossy(&secret.stdout),
+            email,
+            need_sign,
+        ))
     }
 
     /// Verify a detached signature over `data`.
@@ -297,8 +451,11 @@ impl Gpg {
 
     /// ASCII-armored encryption to `recipients` (fingerprints), and to
     /// `hidden` (Bcc: their key ids are not visible to other recipients),
-    /// optionally signed with `sign_key`. `self_key` is added as a hidden
-    /// recipient so the sender can read their own sent copy.
+    /// optionally signed with `sign_key`. `self_key` is added as a normal
+    /// recipient so the sender can read their own sent copy: hiding it would
+    /// protect nothing (the sender's key is public), but every reader's gpg
+    /// would have to try all its secret keys on the anonymous packet,
+    /// prompting for each smartcard.
     ///
     /// Keys are used regardless of their certification ("trust model
     /// always"): callers pass fingerprints they selected from the user's own
@@ -313,10 +470,10 @@ impl Gpg {
         self_key: Option<&str>,
     ) -> Result<Vec<u8>> {
         let mut args: Vec<&str> = vec!["--armor", "--encrypt", "--trust-model", "always"];
-        for r in recipients {
+        for r in recipients.iter().map(String::as_str).chain(self_key) {
             args.extend(["--recipient", r]);
         }
-        for r in hidden.iter().map(String::as_str).chain(self_key) {
+        for r in hidden {
             args.extend(["--hidden-recipient", r]);
         }
         if let Some(k) = sign_key {
@@ -400,5 +557,54 @@ fpr:::::::::FPRCCCC:\n";
         assert!(keys[0].can_encrypt);
         assert_eq!(keys[0].user_ids, vec!["Ann <ann@example.org>"]);
         assert!(!keys[1].can_encrypt);
+    }
+
+    // Shaped like a real key: primary key offline, subkeys on a YubiKey.
+    const PUBLIC: &str = "pub:u:255:22:C74C02E66D0CBECF:1789746560:1852818560::u:::cESCA:::::ed25519:::0:\n\
+fpr:::::::::0B25B26C537B40B5B208F3A6C74C02E66D0CBECF:\n\
+uid:u::::1789746560::HASH::Sebastian Karlsen <sebastian@karlsen.fr>::::::::::0:\n\
+sub:u:255:22:35495314BE571DA3:1789746672:1821282672:::::s:::::ed25519::\n\
+sub:u:255:18:5C6776D77A0675AE:1789746688:1821282688:::::e:::::cv25519::\n";
+    const SECRET: &str = "sec:u:255:22:C74C02E66D0CBECF:1789746560:1852818560::u:::cESCA:::#:::ed25519:::0:\n\
+fpr:::::::::0B25B26C537B40B5B208F3A6C74C02E66D0CBECF:\n\
+ssb:u:255:22:35495314BE571DA3:1789746672:1821282672:::::s:::D2760001240100000006401467850000:::ed25519::\n\
+ssb:u:255:18:5C6776D77A0675AE:1789746688:1821282688:::::e:::D2760001240100000006401467850000:::cv25519::\n";
+
+    #[test]
+    fn secret_key_locations() {
+        let keys = parse_secret_keys(SECRET);
+        assert_eq!(keys.len(), 3);
+        assert_eq!(keys[0].location, SecretLocation::Offline);
+        assert_eq!(keys[0].caps, "c");
+        assert_eq!(keys[2].key_id, "5C6776D77A0675AE");
+        assert_eq!(keys[2].caps, "e");
+        assert_eq!(keys[2].location, SecretLocation::Card("40146785".into()));
+        let local = "ssb:u:255:18:AA:1:2:::::e:::+:::cv25519::\nssb:u:255:18:BB:1:2:::::e::::::cv25519::\n";
+        assert!(parse_secret_keys(local).iter().all(|k| k.location == SecretLocation::Local));
+    }
+
+    #[test]
+    fn own_key_checks() {
+        assert!(own_key_problems(PUBLIC, SECRET, "sebastian@karlsen.fr", true).is_empty());
+        assert!(own_key_problems(PUBLIC, SECRET, "Sebastian@Karlsen.FR", false).is_empty());
+        // Key of another account.
+        let p = own_key_problems(PUBLIC, SECRET, "sebastian@corp.inbox.com", false);
+        assert_eq!(p.len(), 1);
+        assert!(p[0].contains("no user id for sebastian@corp.inbox.com"), "{p:?}");
+        // Not in the keyring at all.
+        assert_eq!(own_key_problems("", "", "a@b.c", false), ["not found in the gpg keyring"]);
+        // Public key only: can't read encrypted mail, can't sign.
+        let p = own_key_problems(PUBLIC, "", "sebastian@karlsen.fr", true);
+        assert_eq!(p.len(), 2, "{p:?}");
+        // Everything offline counts as missing.
+        let offline = SECRET.replace("D2760001240100000006401467850000", "#");
+        assert_eq!(own_key_problems(PUBLIC, &offline, "sebastian@karlsen.fr", false).len(), 1);
+        // Expired: reported once, not also as "no encryption subkey".
+        let expired = PUBLIC.replacen("pub:u:", "pub:e:", 1);
+        let p = own_key_problems(&expired, SECRET, "sebastian@karlsen.fr", false);
+        assert_eq!(p, ["the key has expired"]);
+        // An ambiguous id.
+        let two = format!("{PUBLIC}{}", PUBLIC.replace("C74C02E66D0CBECF", "1111111111111111"));
+        assert!(own_key_problems(&two, SECRET, "sebastian@karlsen.fr", false)[0].contains("matches 2 keys"));
     }
 }
