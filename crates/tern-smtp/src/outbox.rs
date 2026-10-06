@@ -27,6 +27,9 @@ pub struct OutboxMeta {
     /// Local id of the message this replies to; marked \Answered once sent.
     #[serde(default)]
     pub reply_to_message: Option<i64>,
+    /// Local id of the message this forwards; marked $Forwarded once sent.
+    #[serde(default)]
+    pub forwarded_message: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +135,7 @@ mod tests {
             failed: false,
             save_to_sent: true,
             reply_to_message: None,
+            forwarded_message: None,
         };
         let id = o.enqueue(b"raw", &meta).unwrap();
         let mut items = o.list().unwrap();

@@ -57,9 +57,9 @@ const Row *MessageListModel::rowAt(int row) const
         const auto fetched = core().list_rows(static_cast<quint32>(page * PageSize), PageSize);
         rows.reserve(static_cast<qsizetype>(fetched.size()));
         for (const auto &r : fetched) {
-            rows << Row{Key::from(r.key), r.depth,     r.thread_size, r.date,       qs(r.from),
-                        qs(r.to),         qs(r.subject), r.unread,    r.flagged,    r.answered,
-                        r.has_attachments, r.encrypted, r.size};
+            rows << Row{Key::from(r.key), r.depth,     r.thread_size, r.date,        qs(r.from),
+                        qs(r.to),         qs(r.subject), r.unread,    r.flagged,     r.answered,
+                        r.forwarded,      r.has_attachments, r.encrypted, r.size};
         }
         if (m_pageOrder.size() >= MaxPages)
             m_pages.remove(m_pageOrder.takeFirst());
@@ -135,8 +135,12 @@ QVariant MessageListModel::data(const QModelIndex &index, int role) const
                     return QStringLiteral("★");
                 if (r->unread)
                     return QStringLiteral("●");
+                if (r->answered && r->forwarded)
+                    return QStringLiteral("⇄");
                 if (r->answered)
                     return QStringLiteral("↩");
+                if (r->forwarded)
+                    return QStringLiteral("↪");
             }
             return {};
         case Column::Attachment:
@@ -156,8 +160,16 @@ QVariant MessageListModel::data(const QModelIndex &index, int role) const
                 return QIcon::fromTheme(QStringLiteral("flag"), QIcon::fromTheme(QStringLiteral("emblem-important")));
             if (r->unread)
                 return QIcon::fromTheme(QStringLiteral("mail-unread"));
+            // mail-forwarded(-replied) are Breeze names; the spec only has
+            // mail-replied and the mail-forward action.
+            if (r->answered && r->forwarded)
+                return QIcon::fromTheme(QStringLiteral("mail-forwarded-replied"),
+                                        QIcon::fromTheme(QStringLiteral("mail-replied")));
             if (r->answered)
                 return QIcon::fromTheme(QStringLiteral("mail-replied"));
+            if (r->forwarded)
+                return QIcon::fromTheme(QStringLiteral("mail-forwarded"),
+                                        QIcon::fromTheme(QStringLiteral("mail-forward")));
         }
         if (col == Column::Attachment) {
             if (r->encrypted)
@@ -192,6 +204,19 @@ QVariant MessageListModel::data(const QModelIndex &index, int role) const
             return tr("From: %1\nTo: %2").arg(r->from, r->to);
         if (col == Column::Size)
             return QLocale().toString(r->size);
+        if (col == Column::Flag) {
+            // One icon shows; the tooltip lists every state.
+            QStringList states;
+            if (r->flagged)
+                states << tr("Flagged");
+            if (r->unread)
+                states << tr("Unread");
+            if (r->answered)
+                states << tr("Answered");
+            if (r->forwarded)
+                states << tr("Forwarded");
+            return states.isEmpty() ? QVariant() : QVariant(states.join(u'\n'));
+        }
         return {};
     default:
         return {};
@@ -229,7 +254,7 @@ QVariant MessageListModel::headerData(int section, Qt::Orientation orientation, 
     }
     if (role == Qt::ToolTipRole) {
         if (col == Column::Flag)
-            return tr("Flagged, unread or answered");
+            return tr("Flagged, unread, answered or forwarded");
         if (col == Column::Attachment)
             return tr("Attachments or encrypted");
     }
