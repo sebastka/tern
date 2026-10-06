@@ -212,10 +212,31 @@ pub struct Draft {
     pub attachments: Vec<String>,
     pub sign: bool,
     pub encrypt: bool,
+    /// A reply to or forward of encrypted mail: it quotes decrypted text, so
+    /// it must stay encrypted (the composer doesn't turn `encrypt` off).
+    pub encryption_required: bool,
     /// When replying: mark this message as answered after sending.
     pub reply_to_message: Option<MessageKey>,
     /// When forwarding: attach this message as `message/rfc822`.
     pub forward_message: Option<MessageKey>,
+}
+
+/// Which recipients of a draft have an encryption key in the local keyring.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecipientKeys {
+    /// The address fields could be parsed (not while half-typed).
+    pub valid: bool,
+    /// Distinct recipient addresses (To, Cc and Bcc).
+    pub recipients: u32,
+    /// Recipients without a usable key.
+    pub missing: Vec<String>,
+}
+
+impl RecipientKeys {
+    /// Every recipient has a key, and there is at least one recipient.
+    pub fn all_have_keys(&self) -> bool {
+        self.valid && self.recipients > 0 && self.missing.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

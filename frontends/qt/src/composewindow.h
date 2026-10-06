@@ -17,6 +17,7 @@ class QStackedWidget;
 class QTextBrowser;
 class QTextCharFormat;
 class QTextEdit;
+class QTimer;
 class QToolBar;
 
 namespace tern {
@@ -33,6 +34,9 @@ private:
     void send();
     void addAttachments();
     void accountChanged();
+    // Follow `encrypt_when_possible`: Encrypt on when every recipient has a
+    // key, until the user toggles it. The tooltip names those without one.
+    void checkRecipientKeys();
     bool modified() const;
 
     // Editor modes.
@@ -72,6 +76,9 @@ private:
     QListWidget *m_attachments = nullptr;
     QCheckBox *m_sign = nullptr;
     QCheckBox *m_encrypt = nullptr;
+    QTimer *m_keyCheck = nullptr;   // debounces recipient key checks
+    bool m_encryptTouched = false;  // the user toggled Encrypt: leave it alone
+    bool m_encryptWhenPossible = false;
     QString m_initialBody;
     bool m_sent = false;
     quint64 m_pending = 0; // request id while the core builds the message

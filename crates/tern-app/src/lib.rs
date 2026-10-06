@@ -523,14 +523,17 @@ impl App {
             let Some(acc) = inner.account(&key.account) else { return };
             let (fmt, sig) = inner.compose_settings(&key.account);
             let mut draft = compose::reply_template(&key, &r, mode, &acc.config.config.email, fmt, sig.as_ref());
-            inner.apply_pgp_defaults(&mut draft, r.encrypted);
+            if inner.apply_pgp_defaults(&mut draft, r.encrypted) && !draft.encrypt {
+                draft.encrypt = inner.recipient_keys(&draft.to, &draft.cc, &draft.bcc).await.all_have_keys();
+            }
             inner.hub.emit(Event::ComposeReady(draft));
         });
     }
 
-    /// An empty draft for an account, with its PGP defaults.
     /// An empty draft for an account: its editor format, signature and PGP
-    /// defaults.
+    /// defaults. It has no recipients yet, so it isn't encrypted; the
+    /// composer follows `encrypt_when_possible` with [`Self::recipient_keys`]
+    /// as recipients are entered.
     pub fn new_draft(&self, account: &str) -> Draft {
         let (format, sig) = self.inner.compose_settings(account);
         let mut d = Draft {
@@ -541,6 +544,13 @@ impl App {
         };
         self.inner.apply_pgp_defaults(&mut d, false);
         d
+    }
+
+    /// Which recipients in the address fields (free-form, as typed) have an
+    /// encryption key in the local keyring. Quick (one local gpg call), for
+    /// the composer to follow `encrypt_when_possible` while the user types.
+    pub fn recipient_keys(&self, to: &str, cc: &str, bcc: &str) -> RecipientKeys {
+        self.inner.rt.block_on(self.inner.recipient_keys(to, cc, bcc))
     }
 
     /// Convert a draft body when the user switches editor mode.
@@ -1045,16 +1055,41 @@ impl Inner {
         Ok(())
     }
 
-    fn apply_pgp_defaults(&self, d: &mut Draft, replying_to_encrypted: bool) {
+    /// Sign and encrypt defaults that don't depend on the recipients.
+    /// Returns whether the account wants encryption when every recipient
+    /// has a key (`encrypt_when_possible`): the caller decides that once
+    /// the recipients are known (see [`Self::recipient_keys`]).
+    fn apply_pgp_defaults(&self, d: &mut Draft, replying_to_encrypted: bool) -> bool {
         // Replies to encrypted mail stay encrypted, configured or not: the
         // quoted text was decrypted with the user's keyring.
+        d.encryption_required = replying_to_encrypted;
         d.encrypt = replying_to_encrypted;
         let p = lock(&self.profile);
-        let Some(profile) = p.as_ref().and_then(|p| p.config.as_ref()) else { return };
-        let Some(acc) = profile.account(&d.account) else { return };
-        if let Some(pgp) = acc.pgp(&profile.config) {
-            d.sign = pgp.sign_by_default;
-            d.encrypt |= pgp.encrypt_when_possible;
+        let Some(profile) = p.as_ref().and_then(|p| p.config.as_ref()) else { return false };
+        let Some(acc) = profile.account(&d.account) else { return false };
+        let Some(pgp) = acc.pgp(&profile.config) else { return false };
+        d.sign = pgp.sign_by_default;
+        pgp.encrypt_when_possible
+    }
+
+    /// Which recipients of the address fields have a key in the local
+    /// keyring (no network lookup).
+    async fn recipient_keys(&self, to: &str, cc: &str, bcc: &str) -> RecipientKeys {
+        let mut emails: Vec<String> = Vec::new();
+        for field in [to, cc, bcc] {
+            match compose::parse_addresses(field) {
+                Ok(list) => emails.extend(list.into_iter().map(|a| a.email.to_ascii_lowercase())),
+                Err(_) => return RecipientKeys::default(),
+            }
+        }
+        emails.sort();
+        emails.dedup();
+        match self.gpg().without_local_key(&emails).await {
+            Ok(missing) => RecipientKeys { valid: true, recipients: emails.len() as u32, missing },
+            Err(e) => {
+                self.hub.error(format!("Cannot check recipient keys: {e}"));
+                RecipientKeys::default()
+            }
         }
     }
 
