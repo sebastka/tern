@@ -111,6 +111,44 @@ pub struct AttachmentInfo {
     pub size: u64,
 }
 
+/// One header field, for the extended header view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeaderField {
+    pub name: String,
+    pub value: String,
+}
+
+/// What a line of the message source is, for coloring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceLine {
+    Body,
+    /// `Name: value` (message or MIME part header).
+    HeaderField,
+    /// A folded header line (starts with a space or tab).
+    HeaderContinuation,
+    /// A multipart boundary line.
+    Boundary,
+    /// Base64 data.
+    Encoded,
+    /// `>` quoted text.
+    Quote,
+    /// `-----BEGIN/END PGP ...` lines.
+    Armor,
+}
+
+/// A message's source as stored (exactly as received).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageSource {
+    /// Suggested file name for saving (`<subject>.eml`).
+    pub file_name: String,
+    /// The bytes to save.
+    pub raw: Vec<u8>,
+    /// For display: `raw` as text, one line per raw line.
+    pub text: String,
+    /// One entry per line of `text`.
+    pub lines: Vec<SourceLine>,
+}
+
 /// The rendered message, as decided by the shared rendering policy (§10).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageView {
@@ -137,6 +175,8 @@ pub struct MessageView {
     pub decryption_failed: bool,
     pub signature: SignatureState,
     pub signature_text: String,
+    /// All header fields in order (empty while the body is missing).
+    pub headers: Vec<HeaderField>,
     /// Body not downloaded yet (header-only sync so far).
     pub body_missing: bool,
 }

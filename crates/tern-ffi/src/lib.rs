@@ -125,6 +125,32 @@ mod ffi {
         Forward,
     }
 
+    #[derive(Clone)]
+    struct HeaderField {
+        name: String,
+        value: String,
+    }
+
+    #[repr(u8)]
+    enum SourceLine {
+        Body,
+        HeaderField,
+        HeaderContinuation,
+        Boundary,
+        Encoded,
+        Quote,
+        Armor,
+    }
+
+    /// `found == false`: not downloaded yet (the download was requested).
+    struct MessageSource {
+        found: bool,
+        file_name: String,
+        raw: Vec<u8>,
+        text: String,
+        lines: Vec<SourceLine>,
+    }
+
     struct MessageView {
         key: MessageKey,
         subject: String,
@@ -143,6 +169,7 @@ mod ffi {
         decryption_failed: bool,
         signature: SignatureState,
         signature_text: String,
+        headers: Vec<HeaderField>,
         body_missing: bool,
     }
 
@@ -209,6 +236,7 @@ mod ffi {
         fn open_message(self: &App, key: &MessageKey, allow_remote: bool);
         fn resource(self: &App, url: &str) -> Resource;
         fn attachment(self: &App, key: &MessageKey, index: u32) -> Resource;
+        fn message_source(self: &App, key: &MessageKey) -> MessageSource;
         fn mark_read(self: &App, keys: &[MessageKey], read: bool);
         fn mark_flagged(self: &App, keys: &[MessageKey], flagged: bool);
         fn move_messages(self: &App, keys: &[MessageKey], account: &str, folder: i64);
@@ -369,6 +397,7 @@ fn view_out(v: app::MessageView) -> MessageView {
             app::SignatureState::Unknown => SignatureState::Unknown,
         },
         signature_text: v.signature_text,
+        headers: v.headers.into_iter().map(|h| HeaderField { name: h.name, value: h.value }).collect(),
         body_missing: v.body_missing,
     }
 }
@@ -565,6 +594,34 @@ impl App {
         match self.0.attachment(&key_in(key), index) {
             Some((name, data)) => Resource { found: true, name, data },
             None => Resource { found: false, name: String::new(), data: Vec::new() },
+        }
+    }
+
+    fn message_source(&self, key: &MessageKey) -> MessageSource {
+        let line = |l: app::SourceLine| match l {
+            app::SourceLine::Body => SourceLine::Body,
+            app::SourceLine::HeaderField => SourceLine::HeaderField,
+            app::SourceLine::HeaderContinuation => SourceLine::HeaderContinuation,
+            app::SourceLine::Boundary => SourceLine::Boundary,
+            app::SourceLine::Encoded => SourceLine::Encoded,
+            app::SourceLine::Quote => SourceLine::Quote,
+            app::SourceLine::Armor => SourceLine::Armor,
+        };
+        match self.0.message_source(&key_in(key)) {
+            Some(s) => MessageSource {
+                found: true,
+                file_name: s.file_name,
+                raw: s.raw,
+                text: s.text,
+                lines: s.lines.into_iter().map(line).collect(),
+            },
+            None => MessageSource {
+                found: false,
+                file_name: String::new(),
+                raw: Vec::new(),
+                text: String::new(),
+                lines: Vec::new(),
+            },
         }
     }
 

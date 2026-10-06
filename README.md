@@ -255,6 +255,7 @@ the terminal.
 | M / Shift+M | Mark read / unread |
 | S | Toggle flag |
 | T | Threaded / flat list |
+| Ctrl+U | View the message source (Ctrl+S in it: save as `.eml`) |
 | Ctrl+F | Search |
 
 The single-letter keys work while the message list has focus. Messages can
