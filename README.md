@@ -206,7 +206,48 @@ format = "plain"                    # default editor: plain | markdown | html (n
 [memory]
 message_cache_mb = 64               # rendered messages kept in memory, attachments included; 1–4096
 spare_renderer = true               # keep a spare web renderer ready (newer Qt only; restart to apply)
+
+[notifications]                     # also in profile.toml or an account file; most specific wins, per key
+enabled = true                      # desktop notification for new unread mail
+sound = true                        # play the sound theme's "message-new-email" sound
+folders = ["INBOX"]                 # folders that notify; patterns, e.g. ["INBOX", "Lists/*"] or ["*"]
+exclude_folders = []                # folders that never notify (same patterns); they win over `folders`
 ```
+
+`folders` and `exclude_folders` take folder patterns. Write `/` between
+levels whatever the server uses (Tern converts it to the server's separator,
+e.g. `.`):
+
+| Pattern | Matches | Doesn't match |
+|---|---|---|
+| `"*"` | every folder | |
+| `"Lists/*"` | `Lists`, `Lists/rust`, `Lists/rust/dev` | `Listserv`, `Archive/Lists` |
+| `"Lists/rust"` | exactly `Lists/rust` | `Lists`, `Lists/rust-dev`, `Lists/rust/dev` |
+| `"INBOX"`, `"inbox"` | the inbox, in any case | |
+| `"INBOX/*"` | the inbox and folders nested under it (`INBOX.Archive` on servers that nest) | |
+
+`*` only works on its own or as a final `/*`. Patterns like `"Lists*"`,
+`"*/rust"` or `"Lists/*/old"` are reported as configuration errors. Except
+for `INBOX`, names are case-sensitive, as on the server.
+
+To be notified everywhere except in a few folders (opt-out):
+
+```toml
+[notifications]
+folders = ["*"]
+exclude_folders = ["Junk", "Trash", "Lists/*"]
+```
+
+Each key is taken from the most specific file that sets it, and lists are
+not merged: an account's `exclude_folders` replaces the one in tern.toml.
+
+New mail is announced through the freedesktop notification service, so it
+works on any desktop (Plasma, GNOME, or Hyprland with mako, dunst, swaync…).
+Clicking a notification opens the message. Only unread messages that arrive
+after a folder's first sync count, so the initial download stays quiet. The
+sound is played by Tern itself (through libcanberra), from the freedesktop
+sound theme: `message-new-email`, falling back to the theme's general
+`message` sound. `enabled` and `sound` are independent: either can be off.
 
 In threaded view, `sort_by` orders whole threads. Numeric fields (date, size,
 flag, attachment) use the thread's highest value, so `date` means the newest

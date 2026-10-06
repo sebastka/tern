@@ -79,15 +79,15 @@ jobs:
       - name: Install build dependencies (Fedora)
         if: startsWith(matrix.image, 'fedora')
         run: >
-          dnf -y -q install git cmake ninja-build gcc-c++ cargo rust corrosion
-          qt6-qtbase-devel qt6-qtwebengine-devel
+          dnf -y -q install git cmake ninja-build gcc-c++ cargo rust corrosion pkgconf-pkg-config
+          qt6-qtbase-devel qt6-qtwebengine-devel libcanberra-devel
       - name: Install build dependencies (Debian)
         if: startsWith(matrix.image, 'debian')
         run: |
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
             git curl ca-certificates build-essential cmake ninja-build pkg-config \
-            qt6-base-dev qt6-webengine-dev libgl-dev
+            qt6-base-dev qt6-webengine-dev libgl-dev libcanberra-dev
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Rust (Debian's is older than the MSRV)
         if: startsWith(matrix.image, 'debian')

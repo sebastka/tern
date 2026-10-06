@@ -272,11 +272,12 @@ impl Store {
 
     /// Insert header-phase results. Messages that already exist (same UID) are
     /// skipped. A local copy without UID and with the same Message-ID (from an
-    /// offline move or append) is adopted instead of duplicated.
-    pub fn insert_headers(&self, folder: FolderId, items: &[(RemoteHeader, Envelope)]) -> Result<usize> {
+    /// offline move or append) is adopted instead of duplicated. Returns the
+    /// ids of the messages actually inserted (neither skipped nor adopted).
+    pub fn insert_headers(&self, folder: FolderId, items: &[(RemoteHeader, Envelope)]) -> Result<Vec<MessageId>> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
-        let mut inserted = 0;
+        let mut inserted = Vec::new();
         for (h, env) in items {
             if let Some(mid) = &env.message_id {
                 let adopted = tx.execute(
@@ -290,7 +291,9 @@ impl Store {
                     continue;
                 }
             }
-            inserted += insert_message(&tx, folder, Some(h.uid), None, h.flags, &h.keywords, h.modseq, h.size, env)?;
+            if insert_message(&tx, folder, Some(h.uid), None, h.flags, &h.keywords, h.modseq, h.size, env)? > 0 {
+                inserted.push(tx.last_insert_rowid());
+            }
         }
         tx.commit()?;
         Ok(inserted)
@@ -755,8 +758,8 @@ mod tests {
         s.sync_folder_list(&[folder("INBOX", None)]).unwrap();
         let inbox = s.folder_by_name("INBOX").unwrap().unwrap().id;
         let items = vec![header(1, "a@x", "Quarterly report"), header(2, "b@x", "Lunch?")];
-        assert_eq!(s.insert_headers(inbox, &items).unwrap(), 2);
-        assert_eq!(s.insert_headers(inbox, &items).unwrap(), 0);
+        assert_eq!(s.insert_headers(inbox, &items).unwrap().len(), 2);
+        assert_eq!(s.insert_headers(inbox, &items).unwrap().len(), 0);
         assert_eq!(s.uids(inbox).unwrap(), vec![1, 2]);
         assert_eq!(s.folders().unwrap()[0].unread, 2);
 
@@ -791,7 +794,7 @@ mod tests {
         s.move_local(&[id], archive).unwrap();
         assert!(s.uids(archive).unwrap().is_empty());
         // Next sync of Archive sees the message with a server UID.
-        assert_eq!(s.insert_headers(archive, &[header(77, "m@x", "Hi")]).unwrap(), 0);
+        assert_eq!(s.insert_headers(archive, &[header(77, "m@x", "Hi")]).unwrap().len(), 0);
         assert_eq!(s.uids(archive).unwrap(), vec![77]);
         assert_eq!(s.message(id).unwrap().unwrap().uid, Some(77));
     }

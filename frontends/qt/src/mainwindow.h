@@ -28,6 +28,8 @@ public:
     ~MainWindow() override;
 
     void raiseFromOtherInstance(const QString &activationToken);
+    // A new-mail notification was clicked: show that message in its folder.
+    void showNotifiedMessage(const Key &key, qint64 folder, const QString &activationToken);
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -93,6 +95,8 @@ private:
     bool m_threaded = true;
     bool m_initialSelectionDone = false;
     bool m_restoring = false;
+    // Message to select once the list of its folder is open (notification).
+    Key m_pendingShow;
     bool m_layoutApplied = false;
     ffi::ListColumn m_sortBy = ffi::ListColumn::Date;
     Qt::SortOrder m_sortOrder = Qt::DescendingOrder;

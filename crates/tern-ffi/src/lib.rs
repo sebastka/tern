@@ -267,6 +267,10 @@ mod ffi {
         fn send_result(self: &EventSink, ok: bool, text: String);
         fn error(self: &EventSink, text: String);
         fn raise_window(self: &EventSink, activation_token: String);
+        /// A freedesktop sound theme event id, e.g. `message-new-email`.
+        fn play_sound(self: &EventSink, sound: String);
+        /// A new-mail notification was clicked.
+        fn show_message(self: &EventSink, key: MessageKey, folder: i64, activation_token: String);
     }
 
     // C++ builds key lists to pass as slices.
@@ -424,6 +428,10 @@ fn deliver(sink: &EventSink, e: app::Event) {
         app::Event::SendResult { ok, text } => sink.send_result(ok, text),
         app::Event::Error { text } => sink.error(text),
         app::Event::RaiseWindow { activation_token } => sink.raise_window(activation_token),
+        app::Event::PlaySound { sound } => sink.play_sound(sound),
+        app::Event::ShowMessage { key, folder, activation_token } => {
+            sink.show_message(key_out(key), folder.folder, activation_token)
+        }
     }
 }
 

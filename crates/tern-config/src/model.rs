@@ -18,6 +18,24 @@ pub struct GlobalConfig {
     pub memory: MemoryConfig,
     /// Default Sent folder for all profiles (see `AccountConfig`).
     pub sent_folder: Option<String>,
+    pub notifications: NotificationsConfig,
+}
+
+/// `[notifications]` in tern.toml, profile.toml or an account file; the
+/// most specific setting wins, per key.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+pub struct NotificationsConfig {
+    /// Desktop notification for new unread mail. Default: on.
+    pub enabled: Option<bool>,
+    /// Play the sound theme's `message-new-email` sound. Default: on.
+    pub sound: Option<bool>,
+    /// Folders that notify, `/` between levels. `"*"` is every folder,
+    /// `"Lists/*"` is `Lists` and everything below it. Default: `["INBOX"]`.
+    pub folders: Option<Vec<String>>,
+    /// Folders that never notify, same patterns; they win over `folders`.
+    /// Default: none.
+    pub exclude_folders: Option<Vec<String>>,
 }
 
 /// `[memory]` in tern.toml.
@@ -152,6 +170,7 @@ pub struct ProfileConfig {
     /// Accounts not listed follow, sorted by id.
     pub account_order: Vec<String>,
     pub compose: ComposeConfig,
+    pub notifications: NotificationsConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -209,6 +228,8 @@ pub struct AccountConfig {
     pub sent_folder: Option<String>,
     #[serde(default)]
     pub compose: ComposeConfig,
+    #[serde(default)]
+    pub notifications: NotificationsConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]

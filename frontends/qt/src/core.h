@@ -71,6 +71,10 @@ Q_SIGNALS:
     void sendResult(bool ok, const QString &text);
     void error(const QString &text);
     void raiseWindow(const QString &activationToken);
+    // A freedesktop sound theme event id.
+    void playSound(const QString &sound);
+    // A new-mail notification was clicked.
+    void showMessage(const tern::Key &key, qint64 folder, const QString &activationToken);
 };
 
 } // namespace tern

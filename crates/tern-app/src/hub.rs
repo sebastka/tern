@@ -16,6 +16,8 @@ pub struct Dirty {
     /// (account, folder label) → (done, total)
     pub progress: BTreeMap<(String, String), (u32, u32)>,
     pub bodies: Vec<MessageKey>,
+    /// (account, folder) → messages that arrived (for notifications).
+    pub new_mail: BTreeMap<(String, i64), Vec<i64>>,
 }
 
 pub struct Hub {
@@ -67,6 +69,11 @@ impl Hub {
 
     pub fn body_ready(&self, key: MessageKey) {
         self.with(|d| d.bodies.push(key));
+    }
+
+    /// Messages arrived in a folder (see `SyncEvent::NewMessages`).
+    pub fn new_mail(&self, account: &str, folder: i64, ids: Vec<i64>) {
+        self.with(|d| d.new_mail.entry((account.to_owned(), folder)).or_default().extend(ids));
     }
 
     pub fn account_status(&self, account: &str, state: AccountState, text: String) {
