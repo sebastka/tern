@@ -488,7 +488,7 @@ impl Worker {
     }
 
     /// Best-effort bookkeeping after a successful send: copy to Sent and mark
-    /// the replied-to message.
+    /// the replied-to message \Answered, the forwarded one $Forwarded.
     fn after_send(&self, meta: &tern_smtp::OutboxMeta, raw: &[u8]) -> tern_core::Result<()> {
         if meta.save_to_sent {
             let sent = match self.acc.sent_folder_name()? {
@@ -500,8 +500,9 @@ impl Worker {
                 self.hub.folder_dirty(&self.acc.id, sent);
             }
         }
-        if let Some(m) = meta.reply_to_message {
-            ops::set_flags(&self.acc.store, &[m], Flags::ANSWERED, Flags::empty())?;
+        for (message, flag) in [(meta.reply_to_message, Flags::ANSWERED), (meta.forwarded_message, Flags::FORWARDED)] {
+            let Some(m) = message else { continue };
+            ops::set_flags(&self.acc.store, &[m], flag, Flags::empty())?;
             if let Some(msg) = self.acc.store.message(m)? {
                 self.hub.folder_dirty(&self.acc.id, msg.folder_id);
             }

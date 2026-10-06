@@ -360,6 +360,7 @@ impl App {
                     unread: !m.flags.contains(Flags::SEEN),
                     flagged: m.flags.contains(Flags::FLAGGED),
                     answered: m.flags.contains(Flags::ANSWERED),
+                    forwarded: m.flags.contains(Flags::FORWARDED),
                     has_attachments: e.has_attachments,
                     encrypted: e.encrypted,
                     size: m.size,
@@ -940,6 +941,7 @@ impl Inner {
             failed: false,
             save_to_sent: acc.config.config.smtp.save_to_sent,
             reply_to_message: draft.reply_to_message.as_ref().filter(|k| k.account == acc.id).map(|k| k.id),
+            forwarded_message: draft.forward_message.as_ref().filter(|k| k.account == acc.id).map(|k| k.id),
         };
         acc.outbox.enqueue(&built.raw, &meta).map_err(|e| format!("cannot write to the outbox: {e}"))?;
         acc.request(Request::Outbox);

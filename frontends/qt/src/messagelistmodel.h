@@ -21,6 +21,7 @@ struct Row {
     bool unread = false;
     bool flagged = false;
     bool answered = false;
+    bool forwarded = false;
     bool hasAttachments = false;
     bool encrypted = false;
     quint32 size = 0;

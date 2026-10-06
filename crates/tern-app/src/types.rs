@@ -86,6 +86,8 @@ pub struct MessageRow {
     pub unread: bool,
     pub flagged: bool,
     pub answered: bool,
+    /// `$Forwarded` keyword (set by Tern and most other clients).
+    pub forwarded: bool,
     pub has_attachments: bool,
     pub encrypted: bool,
     pub size: u32,

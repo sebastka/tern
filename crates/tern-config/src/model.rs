@@ -98,7 +98,7 @@ impl Default for MessageListConfig {
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum ListField {
-    /// Flagged / unread / answered state. Sorts flagged first, then unread
+    /// Flagged / unread / answered / forwarded state. Sorts flagged first, then unread
     /// (with `desc`).
     Flag,
     Subject,
