@@ -188,10 +188,19 @@ mod ffi {
         attachments: Vec<String>,
         sign: bool,
         encrypt: bool,
+        /// Reply to or forward of encrypted mail: must stay encrypted.
+        encryption_required: bool,
         /// `account` empty: not a reply.
         reply_to_message: MessageKey,
         /// `account` empty: not a forward.
         forward_message: MessageKey,
+    }
+
+    /// See `tern_app::RecipientKeys`.
+    struct RecipientKeys {
+        valid: bool,
+        recipients: u32,
+        missing: Vec<String>,
     }
 
     /// A served resource or attachment; `found == false` if unavailable.
@@ -247,6 +256,7 @@ mod ffi {
 
         fn prepare_reply(self: &App, key: &MessageKey, mode: ReplyMode);
         fn new_draft(self: &App, account: &str) -> Draft;
+        fn recipient_keys(self: &App, to: &str, cc: &str, bcc: &str) -> RecipientKeys;
         fn send(self: &App, draft: Draft) -> u64;
         fn convert_body(self: &App, body: &str, from: BodyFormat, to: BodyFormat) -> String;
         fn markdown_preview(self: &App, markdown: &str) -> String;
@@ -344,6 +354,7 @@ fn draft_out(d: app::Draft) -> Draft {
         attachments: d.attachments,
         sign: d.sign,
         encrypt: d.encrypt,
+        encryption_required: d.encryption_required,
         reply_to_message: opt_key_out(d.reply_to_message),
         forward_message: opt_key_out(d.forward_message),
     }
@@ -365,6 +376,7 @@ fn draft_in(d: Draft) -> app::Draft {
         attachments: d.attachments,
         sign: d.sign,
         encrypt: d.encrypt,
+        encryption_required: d.encryption_required,
     }
 }
 
@@ -670,6 +682,11 @@ impl App {
 
     fn new_draft(&self, account: &str) -> Draft {
         draft_out(self.0.new_draft(account))
+    }
+
+    fn recipient_keys(&self, to: &str, cc: &str, bcc: &str) -> RecipientKeys {
+        let k = self.0.recipient_keys(to, cc, bcc);
+        RecipientKeys { valid: k.valid, recipients: k.recipients, missing: k.missing }
     }
 
     fn send(&self, draft: Draft) -> u64 {

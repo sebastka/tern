@@ -192,6 +192,19 @@ pub fn parse_keys(colons: &str) -> Vec<KeyInfo> {
     keys
 }
 
+/// The addresses no key in `keys` can encrypt to (exact address in a user
+/// id, ignoring case, as gpg's `<address>` patterns match).
+pub fn addresses_without_key(keys: &[KeyInfo], addresses: &[String]) -> Vec<String> {
+    addresses
+        .iter()
+        .filter(|a| {
+            let wanted = format!("<{}>", a.to_ascii_lowercase());
+            !keys.iter().any(|k| k.can_encrypt && k.user_ids.iter().any(|u| u.to_ascii_lowercase().contains(&wanted)))
+        })
+        .cloned()
+        .collect()
+}
+
 /// Where a secret (sub)key is, from field 15 of `--list-secret-keys
 /// --with-colons`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -499,6 +512,21 @@ impl Gpg {
         Ok(parse_keys(&String::from_utf8_lossy(&out.stdout)))
     }
 
+    /// The addresses without a key usable for encryption in the local
+    /// keyring. Local only (never WKD), with a single gpg call, so a
+    /// composer can ask while the user types.
+    pub async fn without_local_key(&self, addresses: &[String]) -> Result<Vec<String>> {
+        if addresses.is_empty() {
+            return Ok(Vec::new());
+        }
+        let patterns: Vec<String> = addresses.iter().map(|a| format!("<{a}>")).collect();
+        let mut args = vec!["--list-keys"];
+        args.extend(patterns.iter().map(String::as_str));
+        // gpg fails when a pattern matches nothing, but lists the others.
+        let out = self.run(&args, &[]).await?;
+        Ok(addresses_without_key(&parse_keys(&String::from_utf8_lossy(&out.stdout)), addresses))
+    }
+
     /// For each address, a fingerprint of a key usable for encryption.
     /// `Err(MissingKeys)` lists the addresses without one.
     pub async fn resolve_recipients(&self, addresses: &[String]) -> Result<Vec<String>> {
@@ -569,6 +597,22 @@ sub:u:255:18:5C6776D77A0675AE:1789746688:1821282688:::::e:::::cv25519::\n";
 fpr:::::::::0B25B26C537B40B5B208F3A6C74C02E66D0CBECF:\n\
 ssb:u:255:22:35495314BE571DA3:1789746672:1821282672:::::s:::D2760001240100000006401467850000:::ed25519::\n\
 ssb:u:255:18:5C6776D77A0675AE:1789746688:1821282688:::::e:::D2760001240100000006401467850000:::cv25519::\n";
+
+    #[test]
+    fn recipients_without_key() {
+        let mut keys = parse_keys(PUBLIC);
+        let addrs = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(addresses_without_key(&keys, &addrs(&["Sebastian@Karlsen.fr"])).is_empty());
+        assert_eq!(
+            addresses_without_key(&keys, &addrs(&["sebastian@karlsen.fr", "ann@example.org"])),
+            ["ann@example.org"]
+        );
+        // Not a substring match: "x" + address is someone else.
+        assert_eq!(addresses_without_key(&keys, &addrs(&["an@karlsen.fr"])), ["an@karlsen.fr"]);
+        // A key that can't encrypt (expired...) doesn't count.
+        keys[0].can_encrypt = false;
+        assert_eq!(addresses_without_key(&keys, &addrs(&["sebastian@karlsen.fr"])), ["sebastian@karlsen.fr"]);
+    }
 
     #[test]
     fn secret_key_locations() {

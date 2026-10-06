@@ -21,6 +21,7 @@
 #include <QTextCharFormat>
 #include <QTextEdit>
 #include <QTextList>
+#include <QTimer>
 #include <QToolBar>
 #include <QVBoxLayout>
 
@@ -216,9 +217,24 @@ ComposeWindow::ComposeWindow(const ffi::Draft &draft, QWidget *parent) : QWidget
         if (qs(a.id) == qs(draft.account)) {
             m_sign->setEnabled(a.has_pgp_key);
             m_sign->setToolTip(a.has_pgp_key ? QString() : tr("No PGP key configured for this account"));
+            m_encryptWhenPossible = a.encrypt_when_possible;
         }
     connect(m_formatBox, &QComboBox::currentIndexChanged, this, &ComposeWindow::formatSelected);
     connect(m_from, &QComboBox::currentIndexChanged, this, &ComposeWindow::accountChanged);
+
+    // Encrypt follows the recipients' keys (debounced while typing) until
+    // the user decides; clicked() is user input only, unlike toggled().
+    m_keyCheck = new QTimer(this);
+    m_keyCheck->setSingleShot(true);
+    m_keyCheck->setInterval(400);
+    connect(m_keyCheck, &QTimer::timeout, this, &ComposeWindow::checkRecipientKeys);
+    for (QLineEdit *e : {m_to, m_cc, m_bcc})
+        connect(e, &QLineEdit::textChanged, m_keyCheck, qOverload<>(&QTimer::start));
+    connect(m_encrypt, &QCheckBox::clicked, this, [this] {
+        m_encryptTouched = true;
+        checkRecipientKeys();
+    });
+    checkRecipientKeys();
 
     const QString subject = m_subject->text();
     setWindowTitle(subject.isEmpty() ? tr("New Message") : subject);
@@ -391,6 +407,7 @@ void ComposeWindow::accountChanged()
             continue;
         m_sign->setEnabled(a.has_pgp_key);
         m_sign->setToolTip(a.has_pgp_key ? QString() : tr("No PGP key configured for this account"));
+        m_encryptWhenPossible = a.encrypt_when_possible;
     }
     // An untouched new message follows the account: its signature, editor
     // mode and PGP defaults. Edited text is never replaced.
@@ -399,10 +416,44 @@ void ComposeWindow::accountChanged()
         setBody(qs(fresh.body), fresh.format);
         m_initialBody = body();
         m_sign->setChecked(fresh.sign && m_sign->isEnabled());
-        m_encrypt->setChecked(fresh.encrypt);
     } else if (!m_sign->isEnabled()) {
         m_sign->setChecked(false);
     }
+    // The new account may want encryption differently.
+    checkRecipientKeys();
+}
+
+void ComposeWindow::checkRecipientKeys()
+{
+    const ffi::RecipientKeys keys = core().recipient_keys(rs(m_to->text()), rs(m_cc->text()), rs(m_bcc->text()));
+    // Half-typed addresses: decide once they parse.
+    if (!keys.valid)
+        return;
+    const QStringList missing = qsl(keys.missing);
+    const bool allHaveKeys = keys.recipients > 0 && missing.isEmpty();
+    // Until the user decides: replies to encrypted mail stay encrypted, and
+    // `encrypt_when_possible` follows the keys.
+    if (!m_encryptTouched && m_draft.encryption_required)
+        m_encrypt->setChecked(true);
+    else if (!m_encryptTouched && m_encryptWhenPossible)
+        m_encrypt->setChecked(allHaveKeys);
+
+    QString tip;
+    if (keys.recipients == 0)
+        tip = tr("Encrypt with the recipients' OpenPGP keys");
+    else if (allHaveKeys)
+        tip = tr("Every recipient has a key in your keyring");
+    else
+        tip = tr("No key in your keyring for:\n%1").arg(missing.join(u'\n'));
+    if (m_draft.encryption_required)
+        tip += QStringLiteral("\n\n") + tr("This replies to or forwards encrypted mail: sending it unencrypted exposes the quoted text.");
+    else if (m_encrypt->isChecked() && !missing.isEmpty())
+        tip += QStringLiteral("\n\n") + tr("Sending will look for these keys (WKD, if enabled) and fail if one is missing.");
+    m_encrypt->setToolTip(tip);
+    // Make a missing key visible without hovering.
+    m_encrypt->setIcon(m_encrypt->isChecked() && !missing.isEmpty()
+                           ? QIcon::fromTheme(QStringLiteral("dialog-warning"))
+                           : QIcon());
 }
 
 void ComposeWindow::addAttachments()
