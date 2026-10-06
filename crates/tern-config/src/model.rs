@@ -19,6 +19,46 @@ pub struct GlobalConfig {
     /// Default Sent folder for all profiles (see `AccountConfig`).
     pub sent_folder: Option<String>,
     pub notifications: NotificationsConfig,
+    pub avatars: AvatarsConfig,
+}
+
+/// `[avatars]` in tern.toml: sender pictures looked up online. A lookup
+/// tells the sender's domain (or the avatar service) that you opened their
+/// mail, so it's off unless enabled.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+pub struct AvatarsConfig {
+    pub lookup: AvatarLookup,
+    /// Tried in this order.
+    pub sources: Vec<AvatarSource>,
+}
+
+impl Default for AvatarsConfig {
+    fn default() -> Self {
+        Self { lookup: AvatarLookup::Off, sources: vec![AvatarSource::Webfinger, AvatarSource::Libravatar] }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AvatarLookup {
+    /// Initials only; cached pictures aren't shown either.
+    #[default]
+    Off,
+    /// Only for messages whose remote content is allowed (`allow_senders`,
+    /// or "Load remote content" clicked).
+    Trusted,
+    /// Every sender (once; results are cached).
+    All,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AvatarSource {
+    /// The sender's domain: `/.well-known/webfinger` avatar link (RFC 7033).
+    Webfinger,
+    /// libravatar.org, by SHA-256 of the address (falls back to Gravatar).
+    Libravatar,
 }
 
 /// `[notifications]` in tern.toml, profile.toml or an account file; the
@@ -94,6 +134,9 @@ pub struct MessageListConfig {
     /// first message otherwise); messages inside a thread stay chronological.
     pub sort_by: ListField,
     pub sort_order: SortOrder,
+    /// Section headers ("Today", "Yesterday", "Last week", months) when
+    /// sorted by date.
+    pub group_by_date: bool,
 }
 
 impl Default for MessageListConfig {
@@ -108,6 +151,7 @@ impl Default for MessageListConfig {
             ],
             sort_by: ListField::Date,
             sort_order: SortOrder::Desc,
+            group_by_date: true,
         }
     }
 }

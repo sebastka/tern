@@ -71,6 +71,8 @@ Q_SIGNALS:
     void sendResult(bool ok, const QString &text);
     void error(const QString &text);
     void raiseWindow(const QString &activationToken);
+    // A sender picture was found (PNG/JPEG/GIF bytes).
+    void avatarReady(const QString &email, const QByteArray &image);
     // A freedesktop sound theme event id.
     void playSound(const QString &sound);
     // A new-mail notification was clicked.

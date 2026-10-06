@@ -7,6 +7,8 @@ qt_add_executable(tern
     src/messagelistmodel.cpp
     src/messageview.cpp
     src/sourcewindow.cpp
+    src/delegates.cpp
+    src/messagebar.cpp
     src/sound.cpp
     src/composewindow.cpp
     src/mainwindow.cpp

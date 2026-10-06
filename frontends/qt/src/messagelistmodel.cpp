@@ -1,6 +1,9 @@
 #include "messagelistmodel.h"
 
+#include "delegates.h"
+
 #include <QApplication>
+#include <algorithm>
 #include <QDateTime>
 #include <QFont>
 #include <QIcon>
@@ -22,7 +25,7 @@ void MessageListModel::setColumns(const QList<Column> &columns)
 }
 
 void MessageListModel::open(const QString &account, qint64 folder, bool threaded, const QString &query,
-                            bool showRecipients)
+                            bool showRecipients, ffi::ListFilter filter)
 {
     beginResetModel();
     m_pages.clear();
@@ -32,8 +35,9 @@ void MessageListModel::open(const QString &account, qint64 folder, bool threaded
         core().close_list();
         m_count = 0;
     } else {
-        m_count = core().open_list(rs(account), folder, threaded, rs(query));
+        m_count = core().open_list(rs(account), folder, threaded, rs(query), filter);
     }
+    loadGroups();
     endResetModel();
 }
 
@@ -43,12 +47,69 @@ void MessageListModel::reload(quint32 count)
     m_pages.clear();
     m_pageOrder.clear();
     m_count = count;
+    loadGroups();
     endResetModel();
 }
 
-const Row *MessageListModel::rowAt(int row) const
+static QString groupLabel(const ffi::ListGroup &g)
 {
-    if (row < 0 || static_cast<quint32>(row) >= m_count)
+    switch (g.kind) {
+    case ffi::DateGroup::Today:
+        return MessageListModel::tr("Today");
+    case ffi::DateGroup::Yesterday:
+        return MessageListModel::tr("Yesterday");
+    case ffi::DateGroup::ThisWeek:
+        return MessageListModel::tr("Earlier this week");
+    case ffi::DateGroup::LastWeek:
+        return MessageListModel::tr("Last week");
+    default: {
+        // "September", or "September 2025" for other years.
+        QString month = QLocale().standaloneMonthName(static_cast<int>(g.month));
+        if (!month.isEmpty())
+            month[0] = month[0].toUpper();
+        return g.year == QDate::currentDate().year() ? month : QStringLiteral("%1 %2").arg(month).arg(g.year);
+    }
+    }
+}
+
+void MessageListModel::loadGroups()
+{
+    m_headers.clear();
+    m_groupStarts.clear();
+    m_headerLabels.clear();
+    if (m_count == 0)
+        return;
+    const auto groups = core().list_groups();
+    for (const auto &g : groups) {
+        m_headers << static_cast<int>(g.start) + static_cast<int>(m_headers.size());
+        m_groupStarts << g.start;
+        m_headerLabels << groupLabel(g);
+    }
+}
+
+qint64 MessageListModel::coreIndex(int row) const
+{
+    // Headers at or before `row`.
+    const auto k = std::upper_bound(m_headers.cbegin(), m_headers.cend(), row) - m_headers.cbegin();
+    if (k > 0 && m_headers[k - 1] == row)
+        return -1;
+    const qint64 i = row - k;
+    return i >= 0 && i < m_count ? i : -1;
+}
+
+int MessageListModel::viewRow(qint64 coreIndex) const
+{
+    if (coreIndex < 0 || coreIndex >= m_count)
+        return -1;
+    // Sections starting at or before the message.
+    const auto k = std::upper_bound(m_groupStarts.cbegin(), m_groupStarts.cend(), coreIndex) - m_groupStarts.cbegin();
+    return static_cast<int>(coreIndex + k);
+}
+
+const Row *MessageListModel::rowAt(int viewRow) const
+{
+    const qint64 row = coreIndex(viewRow);
+    if (row < 0)
         return nullptr;
     const int page = row / PageSize;
     auto it = m_pages.find(page);
@@ -81,7 +142,7 @@ Key MessageListModel::keyAt(int row) const
 
 int MessageListModel::rowCount(const QModelIndex &parent) const
 {
-    return parent.isValid() ? 0 : static_cast<int>(m_count);
+    return parent.isValid() ? 0 : static_cast<int>(m_count + m_headers.size());
 }
 
 int MessageListModel::columnCount(const QModelIndex &parent) const
@@ -89,12 +150,13 @@ int MessageListModel::columnCount(const QModelIndex &parent) const
     return parent.isValid() ? 0 : static_cast<int>(m_columns.size());
 }
 
-static QString formatDate(qint64 ts)
+// With date sections, "Today" and "Yesterday" rows only need the time.
+static QString formatDate(qint64 ts, bool sectioned)
 {
     const QDateTime dt = QDateTime::fromSecsSinceEpoch(ts).toLocalTime();
     const QDate today = QDate::currentDate();
     const QLocale locale;
-    if (dt.date() == today)
+    if (dt.date() == today || (sectioned && dt.date() == today.addDays(-1)))
         return locale.toString(dt.time(), QLocale::ShortFormat);
     if (dt.date().year() == today.year() && dt.date().daysTo(today) < 7)
         return locale.toString(dt, QStringLiteral("ddd ")) + locale.toString(dt.time(), QLocale::ShortFormat);
@@ -103,6 +165,26 @@ static QString formatDate(qint64 ts)
 
 QVariant MessageListModel::data(const QModelIndex &index, int role) const
 {
+    if (coreIndex(index.row()) < 0) {
+        // A date section header, spanned across the row by the view.
+        const qsizetype h = m_headers.indexOf(index.row());
+        if (h < 0 || index.column() != 0)
+            return {};
+        switch (role) {
+        case Qt::DisplayRole:
+            return m_headerLabels.value(h);
+        case Qt::FontRole: {
+            QFont f;
+            f.setBold(true);
+            f.setPointSizeF(f.pointSizeF() * 0.9);
+            return f;
+        }
+        case Qt::ForegroundRole:
+            return QApplication::palette().color(QPalette::PlaceholderText);
+        default:
+            return {};
+        }
+    }
     const Row *r = rowAt(index.row());
     if (!r)
         return {};
@@ -125,16 +207,15 @@ QVariant MessageListModel::data(const QModelIndex &index, int role) const
         case Column::To:
             return r->to;
         case Column::Date:
-            return formatDate(r->date);
+            return formatDate(r->date, !m_headers.isEmpty());
         case Column::Size:
             return QLocale().formattedDataSize(r->size, 0);
         case Column::Flag:
             // Glyphs when the icon theme has no mail icons (e.g. bare WMs).
-            if (!QIcon::hasThemeIcon(QStringLiteral("mail-unread"))) {
+            // Unread is shown by the subject's dot and bold text instead.
+            if (!QIcon::hasThemeIcon(QStringLiteral("mail-replied"))) {
                 if (r->flagged)
                     return QStringLiteral("★");
-                if (r->unread)
-                    return QStringLiteral("●");
                 if (r->answered && r->forwarded)
                     return QStringLiteral("⇄");
                 if (r->answered)
@@ -155,11 +236,13 @@ QVariant MessageListModel::data(const QModelIndex &index, int role) const
             return {};
         }
     case Qt::DecorationRole:
+        // One unread signal: an accent dot (plus bold text), not an icon on
+        // every unread row.
+        if (col == Column::Subject)
+            return unreadDot(QApplication::palette(), r->unread);
         if (col == Column::Flag) {
             if (r->flagged)
                 return QIcon::fromTheme(QStringLiteral("flag"), QIcon::fromTheme(QStringLiteral("emblem-important")));
-            if (r->unread)
-                return QIcon::fromTheme(QStringLiteral("mail-unread"));
             // mail-forwarded(-replied) are Breeze names; the spec only has
             // mail-replied and the mail-forward action.
             if (r->answered && r->forwarded)
@@ -263,6 +346,9 @@ QVariant MessageListModel::headerData(int section, Qt::Orientation orientation, 
 
 Qt::ItemFlags MessageListModel::flags(const QModelIndex &index) const
 {
+    // Section headers can't be selected, and keyboard navigation skips them.
+    if (index.isValid() && coreIndex(index.row()) < 0)
+        return Qt::NoItemFlags;
     return QAbstractTableModel::flags(index) | Qt::ItemIsDragEnabled;
 }
 

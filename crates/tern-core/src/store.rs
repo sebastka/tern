@@ -432,6 +432,14 @@ impl Store {
         Ok(v)
     }
 
+    /// Message id → date (Unix seconds) for a folder, for date sections.
+    pub fn dates(&self, folder: FolderId) -> Result<HashMap<MessageId, i64>> {
+        let conn = self.conn();
+        let mut st = conn.prepare("SELECT id, date FROM messages WHERE folder_id = ?1 AND (flags & 8) = 0")?;
+        let v = st.query_map([folder], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+        Ok(v)
+    }
+
     /// The fields message lists can be sorted by, for all messages of a
     /// folder.
     pub fn sort_inputs(&self, folder: FolderId) -> Result<Vec<SortInput>> {

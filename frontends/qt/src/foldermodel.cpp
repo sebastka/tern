@@ -151,7 +151,8 @@ QVariant FolderModel::data(const QModelIndex &index, int role) const
     const bool isAccount = node.parent < 0;
     switch (role) {
     case Qt::DisplayRole:
-        return node.unread > 0 ? QStringLiteral("%1 (%2)").arg(node.name).arg(node.unread) : node.name;
+        // The unread count is drawn as a badge (BadgeDelegate, UnreadRole).
+        return node.name;
     case Qt::ToolTipRole:
         return isAccount ? node.name
                          : tr("%1\n%2 messages, %3 unread").arg(node.path).arg(node.total).arg(node.unread);

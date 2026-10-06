@@ -11,11 +11,16 @@ publish.workspace = true
 ammonia.workspace = true
 chrono.workspace = true
 futures.workspace = true
+hickory-resolver.workspace = true
 html2text.workspace = true
 htmd.workspace = true
 mail-parser.workspace = true
 pulldown-cmark.workspace = true
 regex.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 tern-config.workspace = true
 tern-core.workspace = true
 tern-imap.workspace = true
@@ -26,6 +31,7 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
+ureq.workspace = true
 zbus.workspace = true
 
 [dev-dependencies]
