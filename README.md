@@ -105,7 +105,7 @@ password.keyring = "service=mail account=posteo"
 save_to_sent = true                 # false if the server files sent mail itself (Gmail)
 
 [pgp]                               # optional, overrides profile.toml
-key = "0xDEADBEEFCAFEBABE"
+key = "0xDEADBEEFCAFEBABE"            # 16-digit long key id or 40-digit fingerprint, no spaces
 sign_by_default = false
 encrypt_when_possible = true
 
@@ -148,6 +148,17 @@ Plaintext passwords are not accepted. Use one of these:
 - `password.keyring`: a Secret Service lookup (KeePassXC, GNOME Keyring,
   KWallet, oo7…). Give `key=value` attributes as for `secret-tool lookup`,
   or one word `x`, which means `service=tern entry=x`.
+
+`pgp.key` is the account's own key, as a 16-digit long key id
+(`gpg --list-keys --keyid-format long`) or the 40-digit fingerprint, with or
+without `0x`. Short 8-digit ids are refused because they are easy to forge.
+When a profile opens and whenever the configuration changes, Tern checks each
+key in the gpg keyring and lists problems under *Configuration problems*: key
+missing or ambiguous, expired or revoked, no user id for the account's
+address (a key copied from another account), no encryption subkey, no
+reachable secret key for decrypting (keys on a smartcard count as reachable),
+and no secret signing key when `sign_by_default = true`. Encrypted mail also
+goes to your own key, so you can read your sent copies.
 
 ### Profile (`profiles/<profile>/profile.toml`, optional)
 

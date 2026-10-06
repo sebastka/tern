@@ -56,6 +56,8 @@ struct ProfileState {
     issues: Vec<String>,
     /// Problems in tern.toml.
     global_issues: Vec<String>,
+    /// Problems with the configured PGP keys in the gpg keyring.
+    pgp_issues: Vec<String>,
     /// Desktop notifications; `None` without a notification server.
     notifier: Option<Arc<notify::Notifier>>,
     _lock: ProfileLock,
@@ -65,7 +67,7 @@ struct ProfileState {
 
 impl ProfileState {
     fn all_issues(&self) -> Vec<String> {
-        self.global_issues.iter().chain(&self.issues).cloned().collect()
+        self.global_issues.iter().chain(&self.issues).chain(&self.pgp_issues).cloned().collect()
     }
 }
 
@@ -209,6 +211,7 @@ impl App {
         let watcher = ConfigWatcher::spawn(&inner.dirs.config, move || {
             if let Some(inner) = weak.upgrade() {
                 inner.reload();
+                inner.check_keys();
             }
         })
         .map_err(|e| warn!("config watcher: {e}"))
@@ -238,6 +241,7 @@ impl App {
             accounts,
             issues,
             global_issues,
+            pgp_issues: Vec::new(),
             notifier,
             _lock: profile_lock,
             _watcher: watcher,
@@ -246,8 +250,12 @@ impl App {
         let issues = state.all_issues();
         *lock(&inner.profile) = Some(state);
         info!(profile = name, "profile opened");
+        for i in &issues {
+            warn!("configuration problem: {i}");
+        }
         inner.hub.emit(Event::ConfigChanged { issues });
         inner.hub.emit(Event::FolderTreeChanged);
+        inner.check_keys();
         Ok(())
     }
 
@@ -632,6 +640,60 @@ impl Inner {
         accounts
     }
 
+    /// Check every account's `pgp.key` against the gpg keyring (exists,
+    /// valid, belongs to the account's address, secret keys reachable) and
+    /// report problems with the configuration problems. Runs in the
+    /// background: gpg may be slow, and the profile must open regardless.
+    fn check_keys(self: &Arc<Self>) {
+        let checks: Vec<(String, String, String, bool)> = {
+            let p = lock(&self.profile);
+            let Some(prof) = p.as_ref().and_then(|s| s.config.as_ref()) else { return };
+            let dir = self.dirs.config.join("profiles").join(&prof.name);
+            prof.accounts
+                .iter()
+                .filter_map(|a| {
+                    let pgp = a.pgp(&prof.config)?;
+                    // The file the key is configured in.
+                    let file = if a.config.pgp.is_some() {
+                        dir.join("accounts").join(format!("{}.toml", a.id))
+                    } else {
+                        dir.join("profile.toml")
+                    };
+                    let label = format!("{}: pgp.key {} ({})", file.display(), pgp.key, a.config.email);
+                    Some((label, pgp.key.clone(), a.config.email.clone(), pgp.sign_by_default))
+                })
+                .collect()
+        };
+        let inner = self.clone();
+        self.rt.spawn(async move {
+            let gpg = inner.gpg();
+            let mut found = Vec::new();
+            for (label, key, email, sign) in checks {
+                match gpg.check_own_key(&key, &email, sign).await {
+                    Ok(problems) => found.extend(problems.into_iter().map(|p| format!("{label}: {p}"))),
+                    Err(e) => {
+                        // gpg can't run at all: one message is enough.
+                        found.push(format!("gpg.program: {e}"));
+                        break;
+                    }
+                }
+            }
+            for f in &found {
+                warn!("PGP key problem: {f}");
+            }
+            let issues = {
+                let mut p = lock(&inner.profile);
+                let Some(state) = p.as_mut() else { return };
+                if state.pgp_issues == found {
+                    return;
+                }
+                state.pgp_issues = found;
+                state.all_issues()
+            };
+            inner.hub.emit(Event::ConfigChanged { issues });
+        });
+    }
+
     /// Settings an account inherits from profile.toml or tern.toml, which
     /// can change without the account being restarted.
     fn apply_inherited_settings(&self, profile: &Profile, accounts: &[Arc<AccountRt>]) {
@@ -653,7 +715,11 @@ impl Inner {
             }
             Err(e) => {
                 warn!("tern.toml has errors, keeping the previous version");
-                (false, issue_strings(&e))
+                let issues = issue_strings(&e);
+                for i in &issues {
+                    warn!("configuration problem: {i}");
+                }
+                (false, issues)
             }
         };
         let mut guard = lock(&self.profile);
@@ -679,6 +745,9 @@ impl Inner {
             Err(e) => {
                 state.issues = issue_strings(&e);
                 warn!("configuration has errors, keeping the previous one");
+                for i in &state.issues {
+                    warn!("configuration problem: {i}");
+                }
                 changed = true;
             }
         }

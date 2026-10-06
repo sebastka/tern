@@ -368,10 +368,27 @@ fn validate_signature(sig: Option<&str>, config_dir: &Path, push: &mut impl FnMu
     }
 }
 
+/// `pgp.key`: a long key id (16 hex digits) or a fingerprint (40), `0x`
+/// optional. Short ids (8 digits) are refused: they are easy to collide.
 fn validate_pgp(p: &PgpConfig, push: &mut impl FnMut(String)) {
-    let key = p.key.trim_start_matches("0x").trim_start_matches("0X");
-    if key.len() < 8 || !key.chars().all(|c| c.is_ascii_hexdigit()) {
+    let key = p.key.strip_prefix("0x").or_else(|| p.key.strip_prefix("0X")).unwrap_or(&p.key);
+    let hex = key.chars().all(|c| c.is_ascii_hexdigit());
+    if key.contains(char::is_whitespace) {
+        push(format!("pgp.key {:?}: write the fingerprint without spaces", p.key));
+    } else if !hex {
         push(format!("pgp.key {:?} is not a hex key id or fingerprint", p.key));
+    } else if key.len() == 8 {
+        push(format!(
+            "pgp.key {:?} is a short key id, which is easy to forge; use the 16-digit long id or the \
+             40-digit fingerprint (gpg --list-keys --keyid-format long)",
+            p.key
+        ));
+    } else if key.len() != 16 && key.len() != 40 {
+        push(format!(
+            "pgp.key {:?} has {} hex digits; expected a 16-digit long key id or a 40-digit fingerprint",
+            p.key,
+            key.len()
+        ));
     }
 }
 
@@ -676,6 +693,25 @@ encrypt_when_possible = true
         assert!(!folder_matches("Lists/*", "Listsx", "/"));
         assert!(folder_matches("inbox/*", "INBOX.Archive", "."));
         assert!(!folder_matches("Archive/*", "INBOX.Archive", "."));
+    }
+
+    #[test]
+    fn pgp_key_formats() {
+        let check = |key: &str| {
+            let mut issues = Vec::new();
+            validate_pgp(
+                &PgpConfig { key: key.into(), sign_by_default: false, encrypt_when_possible: false },
+                &mut |m| issues.push(m),
+            );
+            issues
+        };
+        assert!(check("0xC74C02E66D0CBECF").is_empty());
+        assert!(check("c74c02e66d0cbecf").is_empty());
+        assert!(check("0B25B26C537B40B5B208F3A6C74C02E66D0CBECF").is_empty());
+        assert!(check("0x6D0CBECF")[0].contains("short key id"));
+        assert!(check("0B25 B26C 537B 40B5 B208  F3A6 C74C 02E6 6D0C BECF")[0].contains("without spaces"));
+        assert!(check("0xC74C02E66D0CBEC")[0].contains("15 hex digits"));
+        assert!(check("sebastian@karlsen.fr")[0].contains("not a hex"));
     }
 
     #[test]
