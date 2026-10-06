@@ -7,6 +7,7 @@ qt_add_executable(tern
     src/messagelistmodel.cpp
     src/messageview.cpp
     src/sourcewindow.cpp
+    src/sound.cpp
     src/composewindow.cpp
     src/mainwindow.cpp
     src/profilepicker.cpp
@@ -28,6 +29,7 @@ target_link_libraries(tern PRIVATE
     Qt6::Widgets
     Qt6::WebEngineCore
     Qt6::WebEngineWidgets
+    PkgConfig::CANBERRA
 )
 
 # cargo (re)generates the bridge headers during the build. Declaring them as

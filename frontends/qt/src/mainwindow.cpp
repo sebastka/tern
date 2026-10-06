@@ -3,6 +3,7 @@
 #include "composewindow.h"
 #include "messagelistmodel.h"
 #include "messageview.h"
+#include "sound.h"
 #include "sourcewindow.h"
 
 #include <QAction>
@@ -26,6 +27,8 @@
 #include <QTreeView>
 #include <QUrlQuery>
 #include <QWindow>
+
+#include <utility>
 
 namespace tern {
 
@@ -117,6 +120,8 @@ MainWindow::MainWindow(const QString &profile, QWidget *parent) : QMainWindow(pa
     });
     connect(b, &EventBridge::error, this, [this](const QString &text) { statusBar()->showMessage(text, 10000); });
     connect(b, &EventBridge::raiseWindow, this, &MainWindow::raiseFromOtherInstance);
+    connect(b, &EventBridge::playSound, this, [](const QString &sound) { playThemeSound(sound); });
+    connect(b, &EventBridge::showMessage, this, &MainWindow::showNotifiedMessage);
 
     configChanged(qsl(core().config_issues()));
     refreshFolders();
@@ -490,24 +495,55 @@ void MainWindow::restoreListPosition()
             const qint64 n = id.toLongLong();
             return n > 0 ? core().list_index_of(Key{folder.account, n}.toFfi()) : -1;
         };
+        // A clicked notification's message, shown like a click on it.
+        const Key show = std::exchange(m_pendingShow, Key{});
+        const qint64 showRow = show.account == folder.account ? core().list_index_of(show.toFfi()) : -1;
         if (saved.size() != 3) {
             // Never visited: start where the newest mail is.
             if (m_sortBy == ffi::ListColumn::Date && m_sortOrder == Qt::AscendingOrder)
                 m_list->scrollToBottom();
-            return;
+        } else {
+            // Show the selected message again without marking it read: it
+            // may have been left unread on purpose.
+            if (const qint64 row = rowOf(saved[1]); row >= 0 && showRow < 0 && !m_view->currentKey().valid()) {
+                selectRow(static_cast<int>(row), false);
+                core().open_message(Key{folder.account, saved[1].toLongLong()}.toFfi(), false);
+            }
+            if (saved[2] == u"end") {
+                m_list->scrollToBottom();
+            } else if (const qint64 row = rowOf(saved[0]); row >= 0) {
+                m_list->scrollTo(m_listModel->index(static_cast<int>(row), 0), QAbstractItemView::PositionAtTop);
+            }
         }
-        // Show the selected message again without marking it read: it may
-        // have been left unread on purpose.
-        if (const qint64 row = rowOf(saved[1]); row >= 0 && !m_view->currentKey().valid()) {
-            selectRow(static_cast<int>(row), false);
-            core().open_message(Key{folder.account, saved[1].toLongLong()}.toFfi(), false);
-        }
-        if (saved[2] == u"end") {
-            m_list->scrollToBottom();
-        } else if (const qint64 row = rowOf(saved[0]); row >= 0) {
-            m_list->scrollTo(m_listModel->index(static_cast<int>(row), 0), QAbstractItemView::PositionAtTop);
-        }
+        if (showRow >= 0)
+            selectRow(static_cast<int>(showRow), true);
     });
+}
+
+void MainWindow::showNotifiedMessage(const Key &key, qint64 folder, const QString &activationToken)
+{
+    raiseFromOtherInstance(activationToken);
+    const FolderId id{key.account, folder};
+    const QModelIndex idx = m_folderModel->indexOf(id);
+    if (!idx.isValid())
+        return;
+    m_pendingShow = key;
+    if (m_folder != id) {
+        // folderSelected() reopens the list and restores its position,
+        // which then selects m_pendingShow.
+        m_folders->setCurrentIndex(idx);
+        return;
+    }
+    // Same folder: a search could hide the message.
+    if (!m_search->text().isEmpty()) {
+        m_search->blockSignals(true);
+        m_search->clear();
+        m_search->blockSignals(false);
+        reopenList();
+    }
+    m_pendingShow = {};
+    if (const qint64 row = core().list_index_of(key.toFfi()); row >= 0)
+        selectRow(static_cast<int>(row), true);
 }
 
 void MainWindow::reopenList()

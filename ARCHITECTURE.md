@@ -436,6 +436,10 @@ duplicating any of that.
 - [x] License: MIT OR Apache-2.0 (Rust convention; lets the crates be reused). All
       dependencies are permissive, and Qt is LGPLv3 (dynamically linked).
 - [ ] OAuth2 (Gmail, Microsoft 365): when, and how to configure it in files only.
-- [ ] Notifications: through the freedesktop notification API, configured per
-      folder or per account?
+- [x] Notifications: the freedesktop notification spec over D-Bus, sent from
+      `tern-app` (shared by both frontends). Configured per key in tern.toml,
+      profile.toml or an account file (`[notifications]`), with a folder list
+      per account (default INBOX). The sound comes from the freedesktop sound
+      theme (`message-new-email`) and is played by the frontend (libcanberra
+      in Qt), because many notification servers don't play sounds.
 - [ ] Sieve (ManageSieve) for server-side filters?

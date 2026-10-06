@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 ammonia.workspace = true
 chrono.workspace = true
+futures.workspace = true
 html2text.workspace = true
 htmd.workspace = true
 mail-parser.workspace = true

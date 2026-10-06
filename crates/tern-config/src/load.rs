@@ -55,6 +55,18 @@ impl Account {
         self.config.sent_folder.as_deref().or(profile.sent_folder.as_deref()).or(global.sent_folder.as_deref())
     }
 
+    /// New-mail notification settings, per key: account, then profile, then
+    /// tern.toml, then the defaults (on, with sound, INBOX).
+    pub fn notifications(&self, profile: &ProfileConfig, global: &GlobalConfig) -> Notifications {
+        let levels = [&self.config.notifications, &profile.notifications, &global.notifications];
+        Notifications {
+            enabled: levels.iter().find_map(|n| n.enabled).unwrap_or(true),
+            sound: levels.iter().find_map(|n| n.sound).unwrap_or(true),
+            folders: levels.iter().find_map(|n| n.folders.clone()).unwrap_or_else(|| vec!["INBOX".into()]),
+            exclude_folders: levels.iter().find_map(|n| n.exclude_folders.clone()).unwrap_or_default(),
+        }
+    }
+
     /// Editor mode: account, then profile, then tern.toml, then plain.
     pub fn compose_format(&self, profile: &ProfileConfig, global: &GlobalConfig) -> ComposeFormat {
         self.config.compose.format.or(profile.compose.format).or(global.compose.format).unwrap_or_default()
@@ -65,6 +77,47 @@ impl Account {
         let s = self.config.compose.signature.as_deref().or(profile.compose.signature.as_deref())?;
         Some(resolve_path(config_dir, s))
     }
+}
+
+/// Effective new-mail notification settings of an account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notifications {
+    pub enabled: bool,
+    pub sound: bool,
+    /// Folder patterns (see [`folder_matches`]).
+    pub folders: Vec<String>,
+    /// Folder patterns that win over `folders`.
+    pub exclude_folders: Vec<String>,
+}
+
+impl Notifications {
+    /// Does new mail in `folder` (server name; levels separated by
+    /// `delimiter`) notify?
+    pub fn watches(&self, folder: &str, delimiter: &str) -> bool {
+        let any = |patterns: &[String]| patterns.iter().any(|p| folder_matches(p, folder, delimiter));
+        any(&self.folders) && !any(&self.exclude_folders)
+    }
+}
+
+/// Match a folder pattern from the config against a server folder name:
+/// `*` is every folder, `A/*` is `A` and everything below it, anything else
+/// is one folder. `/` in the pattern is the server's `delimiter`, and
+/// `INBOX` matches in any case, as in IMAP.
+pub fn folder_matches(pattern: &str, folder: &str, delimiter: &str) -> bool {
+    let same = |a: &str, b: &str| a == b || (a.eq_ignore_ascii_case("INBOX") && b.eq_ignore_ascii_case("INBOX"));
+    if pattern == "*" {
+        return true;
+    }
+    if let Some(parent) = pattern.strip_suffix("/*") {
+        let parent = parent.replace('/', delimiter);
+        return same(&parent, folder)
+            || folder.strip_prefix(&parent).is_some_and(|rest| rest.starts_with(delimiter))
+            // INBOX children, e.g. "INBOX.Lists" for "inbox/*".
+            || (parent.eq_ignore_ascii_case("INBOX")
+                && folder.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("INBOX"))
+                && folder[5..].starts_with(delimiter));
+    }
+    same(&pattern.replace('/', delimiter), folder)
 }
 
 /// Resolve a path from the config: `~/` is the home directory, relative paths
@@ -158,11 +211,25 @@ pub fn load_global(config_dir: &Path) -> Result<GlobalConfig, ConfigErrors> {
     if let Some(dup) = first_duplicate(&list.columns) {
         push(format!("ui.message_list.columns lists {dup:?} twice"));
     }
+    validate_notifications(&cfg.notifications, &mut push);
     if issues.is_empty() { Ok(cfg) } else { Err(ConfigErrors(issues)) }
 }
 
 fn first_duplicate<T: PartialEq + std::fmt::Debug>(items: &[T]) -> Option<&T> {
     items.iter().enumerate().find(|(i, x)| items[..*i].contains(x)).map(|(_, x)| x)
+}
+
+fn validate_notifications(n: &NotificationsConfig, push: &mut impl FnMut(String)) {
+    for (key, patterns) in [("folders", &n.folders), ("exclude_folders", &n.exclude_folders)] {
+        for p in patterns.iter().flatten() {
+            let base = if p == "*" { "" } else { p.strip_suffix("/*").unwrap_or(p) };
+            if p != "*" && base.split('/').any(|l| l.trim().is_empty()) {
+                push(format!("notifications.{key}: {p:?} has an empty folder level"));
+            } else if base.contains('*') {
+                push(format!("notifications.{key}: {p:?}: `*` only works alone or as a last `/*`"));
+            }
+        }
+    }
 }
 
 /// A fixed folder name: `/`-separated, non-empty levels.
@@ -271,6 +338,7 @@ fn validate_profile(c: &ProfileConfig, file: &Path, config_dir: &Path, issues: &
     if let Some(dup) = first_duplicate(&c.account_order) {
         push(format!("account_order lists {dup:?} twice"));
     }
+    validate_notifications(&c.notifications, &mut push);
 }
 
 /// `{year}`/`{month}` placeholders, `/`-separated non-empty levels.
@@ -312,6 +380,7 @@ fn validate_account(c: &AccountConfig, file: &Path, config_dir: &Path, issues: &
     validate_archive(c.archive.as_deref(), &mut push);
     validate_folder_name("sent_folder", c.sent_folder.as_deref(), &mut push);
     validate_signature(c.compose.signature.as_deref(), config_dir, &mut push);
+    validate_notifications(&c.notifications, &mut push);
     if c.name.trim().is_empty() {
         push("name must not be empty".into());
     }
@@ -549,6 +618,64 @@ encrypt_when_possible = true
             write(t.path(), "tern.toml", &format!("[ui.message_list]\n{bad}\n"));
             assert!(load_global(t.path()).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn notification_settings() {
+        let t = tempfile::tempdir().unwrap();
+        write(t.path(), "profiles/p/accounts/a.toml", ACCOUNT);
+        let b = ACCOUNT.replace("[imap]", "[notifications]\nfolders = [\"INBOX\", \"Lists/rust\"]\n\n[imap]");
+        write(t.path(), "profiles/p/accounts/b.toml", &b);
+        let g = load_global(t.path()).unwrap();
+        let p = load_profile(t.path(), "p").unwrap();
+        let a = p.accounts[0].notifications(&p.config, &g);
+        assert_eq!(
+            a,
+            Notifications { enabled: true, sound: true, folders: vec!["INBOX".into()], exclude_folders: vec![] }
+        );
+        assert!(a.watches("inbox", "/") && !a.watches("Lists/rust", "/"));
+
+        write(t.path(), "tern.toml", "[notifications]\nsound = false\n");
+        write(t.path(), "profiles/p/profile.toml", "[notifications]\nenabled = false\nsound = true\n");
+        let g = load_global(t.path()).unwrap();
+        let p = load_profile(t.path(), "p").unwrap();
+        // Per key: the profile's `sound` wins over tern.toml.
+        let a = p.accounts[0].notifications(&p.config, &g);
+        assert!(!a.enabled && a.sound);
+        let b = p.accounts[1].notifications(&p.config, &g);
+        // The account's "Lists/rust" is matched with the server's delimiter.
+        assert!(b.watches("Lists.rust", ".") && b.watches("INBOX", "."));
+
+        // Opt-out: everything in tern.toml, exclusions per account.
+        write(t.path(), "tern.toml", "[notifications]\nfolders = [\"*\"]\nexclude_folders = [\"Junk\"]\n");
+        write(t.path(), "profiles/p/profile.toml", "");
+        let c = ACCOUNT.replace("[imap]", "[notifications]\nexclude_folders = [\"Trash\", \"Lists/*\"]\n\n[imap]");
+        write(t.path(), "profiles/p/accounts/b.toml", &c);
+        let g = load_global(t.path()).unwrap();
+        let p = load_profile(t.path(), "p").unwrap();
+        let (a, b) = (p.accounts[0].notifications(&p.config, &g), p.accounts[1].notifications(&p.config, &g));
+        assert!(a.watches("Lists/rust", "/") && !a.watches("Junk", "/"));
+        // The account's exclusions replace tern.toml's (per key, not merged).
+        assert!(b.watches("Junk", "/") && !b.watches("Trash", "/") && !b.watches("Lists/rust", "/"));
+        assert!(b.watches("INBOX", "/") && b.watches("Listsx", "/"));
+
+        for bad in ["folders = [\" \"]", "exclude_folders = [\"a//b\"]", "folders = [\"Li*\"]", "volume = 3"] {
+            write(t.path(), "tern.toml", &format!("[notifications]\n{bad}\n"));
+            assert!(load_global(t.path()).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn folder_patterns() {
+        assert!(folder_matches("*", "anything", "/"));
+        assert!(folder_matches("inbox", "INBOX", "."));
+        assert!(folder_matches("Lists/rust", "Lists.rust", "."));
+        assert!(!folder_matches("Lists/rust", "Lists/rust-dev", "/"));
+        assert!(folder_matches("Lists/*", "Lists", "/"));
+        assert!(folder_matches("Lists/*", "Lists/a/b", "/"));
+        assert!(!folder_matches("Lists/*", "Listsx", "/"));
+        assert!(folder_matches("inbox/*", "INBOX.Archive", "."));
+        assert!(!folder_matches("Archive/*", "INBOX.Archive", "."));
     }
 
     #[test]

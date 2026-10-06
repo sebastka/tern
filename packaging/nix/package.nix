@@ -11,6 +11,7 @@
   pkg-config,
   corrosion,
   qt6,
+  libcanberra,
   gnupg,
 }:
 
@@ -56,6 +57,7 @@ stdenv.mkDerivation {
     qt6.qtbase
     qt6.qtwebengine
     qt6.qtsvg
+    libcanberra
   ];
 
   cmakeFlags = [ (lib.cmakeFeature "CMAKE_BUILD_TYPE" "Release") ];

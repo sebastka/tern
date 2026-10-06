@@ -19,6 +19,9 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_CXX_COMPILER_VERSION VERS
 endif()
 
 find_package(Qt6 6.8 REQUIRED COMPONENTS DBus Widgets WebEngineCore WebEngineWidgets)
+# freedesktop sound theme playback (new-mail sound).
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(CANBERRA REQUIRED IMPORTED_TARGET libcanberra)
 
 # Prefer a system Corrosion (distribution builds are offline), fall back to
 # fetching it.

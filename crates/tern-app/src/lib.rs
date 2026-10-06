@@ -13,13 +13,14 @@ mod dbus;
 pub mod format;
 mod hub;
 mod logging;
+mod notify;
 pub mod render;
 mod sort;
 mod source;
 mod tree;
 pub mod types;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
 use std::time::Duration;
 
@@ -55,6 +56,8 @@ struct ProfileState {
     issues: Vec<String>,
     /// Problems in tern.toml.
     global_issues: Vec<String>,
+    /// Desktop notifications; `None` without a notification server.
+    notifier: Option<Arc<notify::Notifier>>,
     _lock: ProfileLock,
     _watcher: Option<ConfigWatcher>,
     _dbus: Option<zbus::Connection>,
@@ -219,6 +222,15 @@ impl App {
             .and_then(|r| r.map_err(|e| e.to_string()))
             .map_err(|e| warn!("D-Bus single-instance service unavailable: {e}"))
             .ok();
+        let notifier = inner
+            .rt
+            .block_on(async {
+                tokio::time::timeout(Duration::from_secs(3), notify::Notifier::connect(inner.hub.sink.clone())).await
+            })
+            .map_err(|_| "timeout".to_owned())
+            .and_then(|r| r.map_err(|e| e.to_string()))
+            .map_err(|e| warn!("desktop notifications unavailable: {e}"))
+            .ok();
 
         let state = ProfileState {
             name: name.to_owned(),
@@ -226,6 +238,7 @@ impl App {
             accounts,
             issues,
             global_issues,
+            notifier,
             _lock: profile_lock,
             _watcher: watcher,
             _dbus: dbus,
@@ -838,6 +851,76 @@ impl Inner {
         }));
     }
 
+    /// Notify about arrivals, per account: unread messages in the folders
+    /// its `[notifications]` settings watch. One notification per account,
+    /// and at most one sound per batch.
+    async fn notify_new_mail(&self, arrivals: BTreeMap<(String, i64), Vec<i64>>) {
+        let global = self.global_config();
+        let (settings, names, notifier) = {
+            let p = lock(&self.profile);
+            let Some(state) = p.as_ref() else { return };
+            let Some(prof) = &state.config else { return };
+            let settings: HashMap<String, tern_config::Notifications> =
+                prof.accounts.iter().map(|a| (a.id.clone(), a.notifications(&prof.config, &global))).collect();
+            // Name the account only when there is more than one.
+            let names: HashMap<String, String> = if prof.accounts.len() > 1 {
+                prof.accounts.iter().map(|a| (a.id.clone(), a.config.name.clone())).collect()
+            } else {
+                HashMap::new()
+            };
+            (settings, names, state.notifier.clone())
+        };
+
+        let mut per_account: BTreeMap<String, Vec<(tern_core::MessageSummary, i64)>> = BTreeMap::new();
+        for ((account, folder), ids) in arrivals {
+            let Some(n) = settings.get(&account) else { continue };
+            if !n.enabled && !n.sound {
+                continue;
+            }
+            let Some(acc) = self.account(&account) else { continue };
+            let Ok(Some(f)) = acc.store.folder(folder) else { continue };
+            if !n.watches(&f.name, f.delimiter.as_deref().unwrap_or("/")) {
+                continue;
+            }
+            let unread = acc
+                .store
+                .messages(&ids)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|m| !m.flags.contains(Flags::SEEN) && !m.flags.contains(Flags::DELETED));
+            per_account.entry(account).or_default().extend(unread.map(|m| (m, folder)));
+        }
+
+        let mut sound = false;
+        for (account, mut msgs) in per_account {
+            if msgs.is_empty() {
+                continue;
+            }
+            let n = &settings[&account];
+            sound |= n.sound;
+            let Some(notifier) = notifier.as_ref().filter(|_| n.enabled) else { continue };
+            msgs.sort_by_key(|(m, _)| std::cmp::Reverse(m.envelope.date));
+            let arrivals: Vec<notify::Arrival> = msgs
+                .iter()
+                .map(|(m, _)| notify::Arrival {
+                    sender: m.envelope.from.first().map(|a| a.short().to_owned()).unwrap_or_default(),
+                    subject: m.envelope.subject.clone(),
+                })
+                .collect();
+            let (summary, lines) = notify::compose(&arrivals, names.get(&account).map(String::as_str));
+            // Clicking shows the newest message.
+            let (newest, folder) = &msgs[0];
+            let target = (
+                MessageKey { account: account.clone(), id: newest.id },
+                FolderKey { account: account.clone(), folder: *folder },
+            );
+            notifier.show(&summary, &lines, target).await;
+        }
+        if sound {
+            self.hub.emit(Event::PlaySound { sound: notify::NEW_MAIL_SOUND.to_owned() });
+        }
+    }
+
     fn global_config(&self) -> GlobalConfig {
         self.global.read().unwrap_or_else(|p| p.into_inner()).clone()
     }
@@ -974,6 +1057,10 @@ async fn ticker(weak: Weak<Inner>) {
         }
         for ((account, folder), (done, total)) in dirty.progress {
             inner.hub.emit(Event::Progress { account, folder, done, total });
+        }
+        if !dirty.new_mail.is_empty() {
+            let inner = inner.clone();
+            tokio::spawn(async move { inner.notify_new_mail(dirty.new_mail).await });
         }
         let current = lock(&inner.current).clone();
         for key in dirty.bodies {

@@ -66,6 +66,14 @@ public:
     {
         post([t = qs(token)](EventBridge *b) { Q_EMIT b->raiseWindow(t); });
     }
+    void play_sound(rust::String sound) const override
+    {
+        post([s = qs(sound)](EventBridge *b) { Q_EMIT b->playSound(s); });
+    }
+    void show_message(ffi::MessageKey key, std::int64_t folder, rust::String token) const override
+    {
+        post([k = Key::from(key), folder, t = qs(token)](EventBridge *b) { Q_EMIT b->showMessage(k, folder, t); });
+    }
 
 private:
     template<typename F>

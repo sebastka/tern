@@ -25,6 +25,12 @@ pub enum SyncEvent {
     FolderListChanged,
     /// Messages were added, removed or changed in a folder.
     FolderChanged(FolderId),
+    /// Messages that arrived in a folder synced before (never on a folder's
+    /// first sync or after a UIDVALIDITY reset), e.g. to notify the user.
+    NewMessages {
+        folder: FolderId,
+        ids: Vec<MessageId>,
+    },
     /// Header or body download progress for a folder.
     Progress {
         folder: FolderId,
@@ -90,6 +96,8 @@ impl SyncContext<'_> {
         let caps = backend.caps();
         let mut folder = folder.clone();
         let mut changed = false;
+        // Arrivals in a folder we haven't indexed yet aren't news.
+        let synced_before = folder.uidvalidity == Some(st.uidvalidity);
 
         if folder.uidvalidity.is_some_and(|v| v != st.uidvalidity) {
             info!(folder = %folder.name, "UIDVALIDITY changed, resyncing folder");
@@ -135,7 +143,10 @@ impl SyncContext<'_> {
                     (h, env)
                 })
                 .collect();
-            self.store.insert_headers(folder.id, &items)?;
+            let inserted = self.store.insert_headers(folder.id, &items)?;
+            if synced_before && !inserted.is_empty() {
+                self.emit(SyncEvent::NewMessages { folder: folder.id, ids: inserted });
+            }
             done += chunk.len() as u32;
             self.emit(SyncEvent::Progress { folder: folder.id, phase: SyncPhase::Headers, done, total });
             self.emit(SyncEvent::FolderChanged(folder.id));

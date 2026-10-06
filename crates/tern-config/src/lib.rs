@@ -8,8 +8,8 @@ pub mod watch;
 pub mod xdg;
 
 pub use load::{
-    Account, ConfigErrors, ConfigIssue, MAX_SIGNATURE_BYTES, Profile, is_valid_id, list_profiles, load_global,
-    load_profile, resolve_path, signature_format,
+    Account, ConfigErrors, ConfigIssue, MAX_SIGNATURE_BYTES, Notifications, Profile, is_valid_id, list_profiles,
+    load_global, load_profile, resolve_path, signature_format,
 };
 pub use model::*;
 pub use watch::ConfigWatcher;

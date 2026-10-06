@@ -20,6 +20,7 @@ BuildRequires:  cmake(Qt6DBus)
 BuildRequires:  cmake(Qt6Widgets)
 BuildRequires:  cmake(Qt6WebEngineCore)
 BuildRequires:  cmake(Qt6WebEngineWidgets)
+BuildRequires:  pkgconfig(libcanberra)
 BuildRequires:  desktop-file-utils
 
 # OpenPGP goes through the system gpg (ARCHITECTURE.md §11).
@@ -27,6 +28,8 @@ Requires:       gnupg2
 # The app icon is SVG.
 Requires:       qt6-qtsvg
 Recommends:     xdg-desktop-portal
+# The new-mail sound comes from the freedesktop sound theme.
+Recommends:     sound-theme-freedesktop
 
 # QtWebEngine exists only on these.
 ExclusiveArch:  x86_64 aarch64

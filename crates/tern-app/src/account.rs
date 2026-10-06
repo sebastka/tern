@@ -288,6 +288,7 @@ impl Worker {
         move |e| match e {
             SyncEvent::FolderListChanged => hub.tree_dirty(),
             SyncEvent::FolderChanged(f) => hub.folder_dirty(&acc.id, f),
+            SyncEvent::NewMessages { folder, ids } => hub.new_mail(&acc.id, folder, ids),
             SyncEvent::Progress { folder, phase, done, total } => {
                 let name = acc.store.folder(folder).ok().flatten().map(|f| f.name).unwrap_or_default();
                 let label = match phase {

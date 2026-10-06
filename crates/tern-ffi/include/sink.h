@@ -12,6 +12,7 @@
 namespace tern::ffi {
 
 struct MessageView;
+struct MessageKey;
 struct Draft;
 
 class EventSink {
@@ -30,6 +31,10 @@ public:
     virtual void send_result(bool ok, rust::String text) const = 0;
     virtual void error(rust::String text) const = 0;
     virtual void raise_window(rust::String activation_token) const = 0;
+    // A freedesktop sound theme event id, e.g. "message-new-email".
+    virtual void play_sound(rust::String sound) const = 0;
+    // A new-mail notification was clicked: raise and show this message.
+    virtual void show_message(MessageKey key, std::int64_t folder, rust::String activation_token) const = 0;
 };
 
 } // namespace tern::ffi

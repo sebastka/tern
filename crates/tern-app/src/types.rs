@@ -297,4 +297,16 @@ pub enum Event {
     RaiseWindow {
         activation_token: String,
     },
+    /// Play a sound from the freedesktop sound theme (an event id such as
+    /// `message-new-email`).
+    PlaySound {
+        sound: String,
+    },
+    /// The user clicked a new-mail notification: raise the window (with the
+    /// XDG activation token, if any) and show this message in its folder.
+    ShowMessage {
+        key: MessageKey,
+        folder: FolderKey,
+        activation_token: String,
+    },
 }
