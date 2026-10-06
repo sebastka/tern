@@ -15,6 +15,7 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QProgressBar>
+#include <QScrollBar>
 #include <QSettings>
 #include <QSplitter>
 #include <QStandardPaths>
@@ -269,6 +270,7 @@ void MainWindow::saveState()
     saveListHeader();
     m_settings->setValue(QStringLiteral("threaded"), m_threaded);
     m_settings->setValue(QStringLiteral("allHeaders"), m_view->showsAllHeaders());
+    saveListPosition();
     m_settings->setValue(QStringLiteral("lastFolderAccount"), m_folder.account);
     m_settings->setValue(QStringLiteral("lastFolder"), m_folder.folder);
 }
@@ -439,13 +441,73 @@ void MainWindow::folderSelected()
     const FolderId id = m_folderModel->idAt(idx);
     if (id == m_folder)
         return;
+    saveListPosition();
     m_folder = id;
     m_search->blockSignals(true);
     m_search->clear();
     m_search->blockSignals(false);
     reopenList();
     m_view->clear();
+    restoreListPosition();
     updateActions();
+}
+
+static QString positionKey(const FolderId &f)
+{
+    return QStringLiteral("listPosition/%1/%2").arg(f.account).arg(f.folder);
+}
+
+// Stored as "<top message id>,<current message id>,<end|top>": message ids
+// rather than rows, so mail arriving in between doesn't shift the position.
+void MainWindow::saveListPosition()
+{
+    // Search results are not a position in the folder.
+    if (m_folder.account.isEmpty() || !m_search->text().isEmpty())
+        return;
+    const QModelIndex top = m_list->indexAt(QPoint(0, 0));
+    const Key topKey = top.isValid() ? m_listModel->keyAt(top.row()) : Key{};
+    const Key current = currentKey();
+    const QScrollBar *bar = m_list->verticalScrollBar();
+    // At the end (newest mail when sorted ascending): stay at the end, so
+    // newer mail is in view next time.
+    const bool atEnd = bar->maximum() > 0 && bar->value() == bar->maximum();
+    m_settings->setValue(positionKey(m_folder), QStringLiteral("%1,%2,%3")
+                                                    .arg(topKey.valid() ? topKey.id : 0)
+                                                    .arg(current.valid() ? current.id : 0)
+                                                    .arg(atEnd ? QStringLiteral("end") : QStringLiteral("top")));
+}
+
+void MainWindow::restoreListPosition()
+{
+    const QStringList saved = m_settings->value(positionKey(m_folder)).toString().split(u',');
+    const FolderId folder = m_folder;
+    // After the view has laid out the new rows (and, at startup, the window
+    // has its real size).
+    QTimer::singleShot(0, this, [this, folder, saved] {
+        if (folder != m_folder || m_listModel->rowCount() == 0)
+            return;
+        auto rowOf = [&folder](const QString &id) -> qint64 {
+            const qint64 n = id.toLongLong();
+            return n > 0 ? core().list_index_of(Key{folder.account, n}.toFfi()) : -1;
+        };
+        if (saved.size() != 3) {
+            // Never visited: start where the newest mail is.
+            if (m_sortBy == ffi::ListColumn::Date && m_sortOrder == Qt::AscendingOrder)
+                m_list->scrollToBottom();
+            return;
+        }
+        // Show the selected message again without marking it read: it may
+        // have been left unread on purpose.
+        if (const qint64 row = rowOf(saved[1]); row >= 0 && !m_view->currentKey().valid()) {
+            selectRow(static_cast<int>(row), false);
+            core().open_message(Key{folder.account, saved[1].toLongLong()}.toFfi(), false);
+        }
+        if (saved[2] == u"end") {
+            m_list->scrollToBottom();
+        } else if (const qint64 row = rowOf(saved[0]); row >= 0) {
+            m_list->scrollTo(m_listModel->index(static_cast<int>(row), 0), QAbstractItemView::PositionAtTop);
+        }
+    });
 }
 
 void MainWindow::reopenList()

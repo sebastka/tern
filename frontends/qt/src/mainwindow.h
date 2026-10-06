@@ -43,6 +43,9 @@ private:
     void refreshFolders();
     void folderSelected();
     void reopenList();
+    // Per folder: scroll position and selected message, across restarts.
+    void saveListPosition();
+    void restoreListPosition();
     void listChanged(quint32 count);
     void messageActivated();
     void messageLoaded(const std::shared_ptr<ffi::MessageView> &view);
