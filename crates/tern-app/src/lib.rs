@@ -15,6 +15,7 @@ mod hub;
 mod logging;
 pub mod render;
 mod sort;
+mod source;
 mod tree;
 pub mod types;
 
@@ -414,6 +415,21 @@ impl App {
         r.attachments.iter().find(|(a, _)| a.index == index).map(|(a, d)| (a.filename.clone(), d.clone()))
     }
 
+    /// The message exactly as stored (as received from the server), with a
+    /// display version for "View Source". `None` if it isn't downloaded yet
+    /// (the download is then requested).
+    pub fn message_source(&self, key: &MessageKey) -> Option<MessageSource> {
+        let acc = self.inner.account(&key.account)?;
+        let m = acc.store.message(key.id).ok()??;
+        let Some(blob) = m.blob.as_deref() else {
+            acc.request(Request::Body(key.id));
+            return None;
+        };
+        let raw = acc.blobs.get(blob).ok()?;
+        let (text, lines) = source::classify(&raw);
+        Some(MessageSource { file_name: source::file_name(&m.envelope.subject), raw, text, lines })
+    }
+
     pub fn mark_read(&self, keys: &[MessageKey], read: bool) {
         let (add, remove) = if read { (Flags::SEEN, Flags::empty()) } else { (Flags::empty(), Flags::SEEN) };
         self.inner.change(keys, |acc, ids| ops::set_flags(&acc.store, ids, add, remove));
@@ -782,6 +798,7 @@ impl Inner {
                 decryption_failed: false,
                 signature: SignatureState::None,
                 signature_text: String::new(),
+                headers: Vec::new(),
                 body_missing: true,
             }));
             return;
@@ -811,6 +828,11 @@ impl Inner {
             decryption_failed: r.decryption_failed,
             signature: r.signature,
             signature_text: r.signature_text.clone(),
+            headers: r
+                .headers
+                .iter()
+                .map(|(name, value)| HeaderField { name: name.clone(), value: value.clone() })
+                .collect(),
             body_missing: false,
         }));
     }

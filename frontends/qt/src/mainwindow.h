@@ -58,6 +58,7 @@ private:
     void archiveSelected();
     void markRead(bool read);
     void toggleFlag();
+    void viewSource();
     void openMailto(const QUrl &url);
     void openDraft(const ffi::Draft &draft);
 
@@ -102,6 +103,7 @@ private:
     QAction *m_markUnreadAct = nullptr;
     QAction *m_flagAct = nullptr;
     QAction *m_threadedAct = nullptr;
+    QAction *m_sourceAct = nullptr;
 };
 
 } // namespace tern

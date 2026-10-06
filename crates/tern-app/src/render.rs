@@ -40,6 +40,8 @@ pub struct Rendered {
     pub decryption_failed: bool,
     pub signature: SignatureState,
     pub signature_text: String,
+    /// All header fields of the outer message, in order: (name, value).
+    pub headers: Vec<(String, String)>,
     // Reply support.
     pub message_id: Option<String>,
     pub references: Vec<String>,
@@ -164,6 +166,38 @@ fn addr_list(a: Option<&mail_parser::Address<'_>>) -> (String, Vec<String>) {
     (display, full)
 }
 
+/// Header fields shown at most; hostile mail can have any number.
+const MAX_HEADERS: usize = 500;
+/// Longer header values are cut (DKIM signatures are about 1 KiB).
+const MAX_HEADER_CHARS: usize = 8192;
+
+/// The header fields of `msg` for the extended header view. Values are
+/// shown as written (unfolded), so Message-IDs, Received and dates stay
+/// exact; only values with RFC 2047 encoded words use the decoded form.
+pub fn header_fields(msg: &Message<'_>, raw: &[u8]) -> Vec<(String, String)> {
+    msg.headers()
+        .iter()
+        .take(MAX_HEADERS)
+        .map(|h| {
+            let written = raw.get(h.offset_start as usize..h.offset_end as usize).unwrap_or_default();
+            let written = String::from_utf8_lossy(written).replace(['\r', '\n'], "");
+            let decoded = match &h.value {
+                _ if !written.contains("=?") => None,
+                mail_parser::HeaderValue::Text(t) => Some(t.to_string()),
+                mail_parser::HeaderValue::TextList(l) => Some(l.join(", ")),
+                mail_parser::HeaderValue::Address(a) => Some(addr_list(Some(a)).0),
+                _ => None,
+            };
+            let mut value = decoded.unwrap_or(written).trim().to_owned();
+            if let Some((cut, _)) = value.char_indices().nth(MAX_HEADER_CHARS) {
+                value.truncate(cut);
+                value.push('…');
+            }
+            (h.name.as_str().to_owned(), value)
+        })
+        .collect()
+}
+
 /// Render a raw message. Never fails: problems are shown in the document.
 pub async fn render(raw: &[u8], opts: &RenderOptions<'_>) -> Rendered {
     let parser = MessageParser::default();
@@ -177,6 +211,7 @@ pub async fn render(raw: &[u8], opts: &RenderOptions<'_>) -> Rendered {
         date: outer.date().map(|d| d.to_timestamp()).unwrap_or(0),
         remote_allowed: opts.allow_remote,
         message_id: outer.message_id().map(str::to_owned),
+        headers: header_fields(&outer, raw),
         ..Default::default()
     };
     (r.from, _) = addr_list(outer.from());
@@ -539,6 +574,25 @@ mod tests {
         assert!(clean.contains("p{color:red}"));
         assert!(REMOTE.is_match(&clean));
         assert!(!REMOTE.is_match(&sanitize("<p style=\"color:red\">x</p>", "b")));
+    }
+
+    #[test]
+    fn extended_headers() {
+        let raw = b"Received: from a\r\n\tby b; Mon, 5 Oct 2026 10:00:00 +0200\r\n\
+            From: =?utf-8?q?S=C3=A9b?= <seb@example.org>\r\n\
+            Subject: =?utf-8?b?SMOpbGxv?=\r\n\
+            Message-ID: <abc@example.org>\r\n\
+            X-Custom: kept   as is\r\n\r\nbody\r\n";
+        let msg = MessageParser::default().parse(&raw[..]).unwrap();
+        let h = header_fields(&msg, raw);
+        let get = |n: &str| h.iter().find(|(k, _)| k == n).map(|(_, v)| v.as_str());
+        assert_eq!(h.len(), 5);
+        assert_eq!(h[0].0, "Received");
+        assert_eq!(get("Received"), Some("from a\tby b; Mon, 5 Oct 2026 10:00:00 +0200"));
+        assert_eq!(get("From"), Some("Séb <seb@example.org>"));
+        assert_eq!(get("Subject"), Some("Héllo"));
+        assert_eq!(get("Message-ID"), Some("<abc@example.org>"));
+        assert_eq!(get("X-Custom"), Some("kept   as is"));
     }
 
     #[test]

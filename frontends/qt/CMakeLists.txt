@@ -6,6 +6,7 @@ qt_add_executable(tern
     src/foldermodel.cpp
     src/messagelistmodel.cpp
     src/messageview.cpp
+    src/sourcewindow.cpp
     src/composewindow.cpp
     src/mainwindow.cpp
     src/profilepicker.cpp

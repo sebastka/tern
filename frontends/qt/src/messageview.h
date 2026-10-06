@@ -16,6 +16,8 @@ class QLabel;
 class QHBoxLayout;
 class QPushButton;
 class QCheckBox;
+class QTextBrowser;
+class QToolButton;
 class QWebEngineView;
 class QWebEngineProfile;
 
@@ -77,12 +79,18 @@ public:
     Key currentKey() const { return m_key; }
     // Plain text of the displayed message (for quoting fallbacks).
     QString currentText() const;
+    // All header fields instead of From/To/Cc/Date (kept across messages).
+    bool showsAllHeaders() const;
+    void setShowAllHeaders(bool on);
+    // Open the source window for the displayed message.
+    void viewSource();
 
 Q_SIGNALS:
     void mailtoClicked(const QUrl &url);
 
 private:
     void load();
+    void updateHeaderView();
     void saveAttachment(quint32 index, const QString &filename);
     void openAttachment(quint32 index, const QString &filename);
     void showContextMenu(const QPoint &pos);
@@ -98,6 +106,9 @@ private:
     QWidget *m_header = nullptr;
     QLabel *m_subject = nullptr;
     QLabel *m_meta = nullptr;
+    QTextBrowser *m_allHeaders = nullptr;
+    QToolButton *m_headersButton = nullptr;
+    QToolButton *m_sourceButton = nullptr;
     QLabel *m_security = nullptr;
     QWidget *m_remoteBar = nullptr;
     QWidget *m_attachmentBar = nullptr;

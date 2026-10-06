@@ -3,6 +3,7 @@
 #include "composewindow.h"
 #include "messagelistmodel.h"
 #include "messageview.h"
+#include "sourcewindow.h"
 
 #include <QAction>
 #include <QApplication>
@@ -161,6 +162,10 @@ void MainWindow::createActions()
     });
     m_threadedAct->setCheckable(true);
     m_threadedAct->setChecked(m_threaded);
+    m_sourceAct = action(QStringLiteral("view-source"), tr("View Source"), QKeySequence(Qt::CTRL | Qt::Key_U),
+                         &MainWindow::viewSource);
+    if (!QIcon::hasThemeIcon(QStringLiteral("view-source")))
+        m_sourceAct->setIcon(QIcon::fromTheme(QStringLiteral("text-x-generic")));
     // Single-key shortcuts only while the message list has focus, so typing
     // elsewhere (search) isn't hijacked.
     for (QAction *a : {m_archiveAct, m_deleteAct, m_markReadAct, m_markUnreadAct, m_flagAct, m_threadedAct}) {
@@ -220,6 +225,8 @@ void MainWindow::createActions()
     msg->addSeparator();
     msg->addAction(m_archiveAct);
     msg->addAction(m_deleteAct);
+    msg->addSeparator();
+    msg->addAction(m_sourceAct);
     QMenu *help = menuBar()->addMenu(tr("&Help"));
     help->addAction(tr("Configuration Problems…"), this, &MainWindow::showConfigIssues);
     help->addAction(tr("About Tern"), this, [this] {
@@ -232,6 +239,10 @@ void MainWindow::createActions()
     m_list->setContextMenuPolicy(Qt::ActionsContextMenu);
     for (QAction *a : {m_replyAct, m_replyAllAct, m_forwardAct})
         m_list->addAction(a);
+    auto *sep = new QAction(this);
+    sep->setSeparator(true);
+    m_list->addAction(sep);
+    m_list->addAction(m_sourceAct);
 }
 
 void MainWindow::restoreState()
@@ -240,6 +251,7 @@ void MainWindow::restoreState()
     QMainWindow::restoreState(m_settings->value(QStringLiteral("windowState")).toByteArray());
     m_hsplit->restoreState(m_settings->value(QStringLiteral("hsplit")).toByteArray());
     m_vsplit->restoreState(m_settings->value(QStringLiteral("vsplit")).toByteArray());
+    m_view->setShowAllHeaders(m_settings->value(QStringLiteral("allHeaders"), false).toBool());
     if (m_settings->contains(QStringLiteral("threaded"))) {
         m_threaded = m_settings->value(QStringLiteral("threaded")).toBool();
         m_threadedAct->setChecked(m_threaded);
@@ -256,6 +268,7 @@ void MainWindow::saveState()
     m_settings->setValue(QStringLiteral("vsplit"), m_vsplit->saveState());
     saveListHeader();
     m_settings->setValue(QStringLiteral("threaded"), m_threaded);
+    m_settings->setValue(QStringLiteral("allHeaders"), m_view->showsAllHeaders());
     m_settings->setValue(QStringLiteral("lastFolderAccount"), m_folder.account);
     m_settings->setValue(QStringLiteral("lastFolder"), m_folder.folder);
 }
@@ -533,7 +546,7 @@ void MainWindow::updateActions()
 {
     const bool one = currentKey().valid();
     const bool any = !m_list->selectionModel()->selectedRows().isEmpty();
-    for (QAction *a : {m_replyAct, m_replyAllAct, m_forwardAct})
+    for (QAction *a : {m_replyAct, m_replyAllAct, m_forwardAct, m_sourceAct})
         a->setEnabled(one);
     for (QAction *a : {m_deleteAct, m_markReadAct, m_markUnreadAct, m_flagAct})
         a->setEnabled(any);
@@ -590,6 +603,13 @@ void MainWindow::reply(ffi::ReplyMode mode)
     const Key key = currentKey();
     if (key.valid())
         core().prepare_reply(key.toFfi(), mode);
+}
+
+void MainWindow::viewSource()
+{
+    const Key key = currentKey();
+    const Row *r = m_listModel->rowAt(m_list->currentIndex().row());
+    showMessageSource(this, key, r ? r->subject : QString());
 }
 
 void MainWindow::deleteSelected()

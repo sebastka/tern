@@ -1,5 +1,7 @@
 #include "messageview.h"
 
+#include "sourcewindow.h"
+
 #include <QBuffer>
 #include <QCheckBox>
 #include <QDBusConnection>
@@ -23,6 +25,7 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QStandardPaths>
+#include <QTextBrowser>
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <QWebEngineContextMenuRequest>
@@ -182,7 +185,25 @@ MessageView::MessageView(QWidget *parent) : QWidget(parent)
     m_subject->setTextInteractionFlags(Qt::TextSelectableByMouse);
     m_plain = new QCheckBox(tr("Plain text"), m_header);
     connect(m_plain, &QCheckBox::toggled, this, &MessageView::load);
+    m_headersButton = new QToolButton(m_header);
+    m_headersButton->setText(tr("Headers"));
+    m_headersButton->setIcon(QIcon::fromTheme(QStringLiteral("view-list-details")));
+    m_headersButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    m_headersButton->setAutoRaise(true);
+    m_headersButton->setCheckable(true);
+    m_headersButton->setToolTip(tr("Show all header fields"));
+    connect(m_headersButton, &QToolButton::toggled, this, &MessageView::updateHeaderView);
+    m_sourceButton = new QToolButton(m_header);
+    m_sourceButton->setText(tr("Source"));
+    m_sourceButton->setIcon(
+        QIcon::fromTheme(QStringLiteral("view-source"), QIcon::fromTheme(QStringLiteral("text-x-generic"))));
+    m_sourceButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    m_sourceButton->setAutoRaise(true);
+    m_sourceButton->setToolTip(tr("View the message as received (Ctrl+U)"));
+    connect(m_sourceButton, &QToolButton::clicked, this, &MessageView::viewSource);
     top->addWidget(m_subject, 1);
+    top->addWidget(m_headersButton, 0, Qt::AlignTop);
+    top->addWidget(m_sourceButton, 0, Qt::AlignTop);
     top->addWidget(m_plain, 0, Qt::AlignTop);
     hl->addLayout(top);
     m_meta = new QLabel(m_header);
@@ -190,6 +211,14 @@ MessageView::MessageView(QWidget *parent) : QWidget(parent)
     m_meta->setWordWrap(true);
     m_meta->setTextInteractionFlags(Qt::TextSelectableByMouse);
     hl->addWidget(m_meta);
+    // Plain rich text only: no links are followed, no resources loaded.
+    m_allHeaders = new QTextBrowser(m_header);
+    m_allHeaders->setOpenLinks(false);
+    m_allHeaders->setOpenExternalLinks(false);
+    m_allHeaders->setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+    m_allHeaders->setMaximumHeight(240);
+    m_allHeaders->hide();
+    hl->addWidget(m_allHeaders);
     m_security = new QLabel(m_header);
     m_security->setWordWrap(true);
     m_security->setMargin(4);
@@ -240,6 +269,28 @@ void MessageView::clear()
 
 QString MessageView::currentText() const { return m_view ? qs(m_view->text) : QString(); }
 
+bool MessageView::showsAllHeaders() const { return m_headersButton->isChecked(); }
+
+void MessageView::setShowAllHeaders(bool on) { m_headersButton->setChecked(on); }
+
+void MessageView::updateHeaderView()
+{
+    // The full list arrives with the body; until then the short form stays.
+    const bool available = m_view && !m_view->headers.empty();
+    const bool all = m_headersButton->isChecked() && available;
+    m_allHeaders->setVisible(all);
+    m_meta->setVisible(!all);
+    m_headersButton->setEnabled(available);
+    m_headersButton->setToolTip(available ? tr("Show all header fields")
+                                          : tr("The header fields are shown once the message is downloaded"));
+}
+
+void MessageView::viewSource()
+{
+    if (m_view)
+        showMessageSource(this, m_key, qs(m_view->subject));
+}
+
 static QString escaped(const QString &s) { return s.toHtmlEscaped(); }
 
 void MessageView::showMessage(const std::shared_ptr<ffi::MessageView> &view)
@@ -260,6 +311,14 @@ void MessageView::showMessage(const std::shared_ptr<ffi::MessageView> &view)
                 .arg(tr("Date:"),
                      QLocale().toString(QDateTime::fromSecsSinceEpoch(view->date).toLocalTime(), QLocale::LongFormat));
     m_meta->setText(meta);
+
+    QString all = QStringLiteral("<table cellspacing='0' cellpadding='1'>");
+    for (const auto &h : view->headers)
+        all += QStringLiteral("<tr><td valign='top' style='white-space:pre'><b>%1:</b> </td><td>%2</td></tr>")
+                   .arg(escaped(qs(h.name)), escaped(qs(h.value)));
+    all += QStringLiteral("</table>");
+    m_allHeaders->setHtml(all);
+    updateHeaderView();
 
     // Security banner: encryption and signature state, as decided in Rust.
     QString sec;
