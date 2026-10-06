@@ -53,6 +53,10 @@ MainWindow::MainWindow(const QString &profile, QWidget *parent) : QMainWindow(pa
     // Unread counts as badges; a lighter indent for deep hierarchies.
     m_folders->setItemDelegate(new BadgeDelegate(FolderModel::UnreadRole, m_folders));
     m_folders->setIndentation(14);
+    // No frames around the panes: Breeze draws a frame line on each side of
+    // the scrollbar between them. The splitter alone separates the panes,
+    // as in current KDE apps.
+    m_folders->setFrameShape(QFrame::NoFrame);
     m_folders->setDragDropMode(QAbstractItemView::DropOnly);
     m_folders->setDropIndicatorShown(true);
     m_folders->setDefaultDropAction(Qt::MoveAction);
@@ -61,6 +65,7 @@ MainWindow::MainWindow(const QString &profile, QWidget *parent) : QMainWindow(pa
     m_listModel = new MessageListModel(this);
     m_list = new QTreeView(this);
     m_list->setModel(m_listModel);
+    m_list->setFrameShape(QFrame::NoFrame);
     m_list->setRootIsDecorated(false);
     m_list->setUniformRowHeights(true);
     m_list->setAllColumnsShowFocus(true);
