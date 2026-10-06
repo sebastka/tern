@@ -31,6 +31,8 @@ public:
     virtual void send_result(bool ok, rust::String text) const = 0;
     virtual void error(rust::String text) const = 0;
     virtual void raise_window(rust::String activation_token) const = 0;
+    // A sender picture was found for `email` (PNG/JPEG/GIF bytes).
+    virtual void avatar_ready(rust::String email, rust::Vec<std::uint8_t> image) const = 0;
     // A freedesktop sound theme event id, e.g. "message-new-email".
     virtual void play_sound(rust::String sound) const = 0;
     // A new-mail notification was clicked: raise and show this message.

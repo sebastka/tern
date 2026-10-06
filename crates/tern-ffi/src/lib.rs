@@ -113,6 +113,31 @@ mod ffi {
         Size,
     }
 
+    /// See `tern_app::ListFilter`.
+    #[derive(Clone, Copy)]
+    struct ListFilter {
+        unread: bool,
+        flagged: bool,
+        attachments: bool,
+    }
+
+    #[repr(u8)]
+    enum DateGroup {
+        Today,
+        Yesterday,
+        ThisWeek,
+        LastWeek,
+        Month,
+    }
+
+    /// A date section header before row `start` (see `tern_app::ListGroup`).
+    struct ListGroup {
+        start: u32,
+        kind: DateGroup,
+        year: i32,
+        month: u32,
+    }
+
     struct ListLayout {
         columns: Vec<ListColumn>,
         sort_by: ListColumn,
@@ -124,6 +149,13 @@ mod ffi {
         Reply,
         ReplyAll,
         Forward,
+    }
+
+    #[derive(Clone)]
+    struct Person {
+        /// May be empty.
+        name: String,
+        email: String,
     }
 
     #[derive(Clone)]
@@ -171,6 +203,11 @@ mod ffi {
         signature: SignatureState,
         signature_text: String,
         headers: Vec<HeaderField>,
+        sender: Person,
+        to_people: Vec<Person>,
+        cc_people: Vec<Person>,
+        /// PNG/JPEG/GIF, empty if none.
+        avatar: Vec<u8>,
         body_missing: bool,
     }
 
@@ -236,7 +273,8 @@ mod ffi {
         fn list_layout(self: &App) -> ListLayout;
 
         fn folder_tree(self: &App) -> Vec<FolderNode>;
-        fn open_list(self: &App, account: &str, folder: i64, threaded: bool, query: &str) -> u32;
+        fn open_list(self: &App, account: &str, folder: i64, threaded: bool, query: &str, filter: ListFilter) -> u32;
+        fn list_groups(self: &App) -> Vec<ListGroup>;
         fn close_list(self: &App);
         fn list_count(self: &App) -> u32;
         fn list_rows(self: &App, offset: u32, count: u32) -> Vec<MessageRow>;
@@ -278,6 +316,8 @@ mod ffi {
         fn send_result(self: &EventSink, ok: bool, text: String);
         fn error(self: &EventSink, text: String);
         fn raise_window(self: &EventSink, activation_token: String);
+        /// A sender picture was found for `email` (PNG/JPEG/GIF).
+        fn avatar_ready(self: &EventSink, email: String, image: Vec<u8>);
         /// A freedesktop sound theme event id, e.g. `message-new-email`.
         fn play_sound(self: &EventSink, sound: String);
         /// A new-mail notification was clicked.
@@ -380,6 +420,10 @@ fn draft_in(d: Draft) -> app::Draft {
     }
 }
 
+fn person_out(p: app::Person) -> Person {
+    Person { name: p.name, email: p.email }
+}
+
 fn view_out(v: app::MessageView) -> MessageView {
     MessageView {
         key: key_out(v.key),
@@ -415,6 +459,10 @@ fn view_out(v: app::MessageView) -> MessageView {
         },
         signature_text: v.signature_text,
         headers: v.headers.into_iter().map(|h| HeaderField { name: h.name, value: h.value }).collect(),
+        sender: person_out(v.sender),
+        to_people: v.to_people.into_iter().map(person_out).collect(),
+        cc_people: v.cc_people.into_iter().map(person_out).collect(),
+        avatar: v.avatar,
         body_missing: v.body_missing,
     }
 }
@@ -441,6 +489,7 @@ fn deliver(sink: &EventSink, e: app::Event) {
         app::Event::SendResult { ok, text } => sink.send_result(ok, text),
         app::Event::Error { text } => sink.error(text),
         app::Event::RaiseWindow { activation_token } => sink.raise_window(activation_token),
+        app::Event::AvatarReady { email, image } => sink.avatar_ready(email, image),
         app::Event::PlaySound { sound } => sink.play_sound(sound),
         app::Event::ShowMessage { key, folder, activation_token } => {
             sink.show_message(key_out(key), folder.folder, activation_token)
@@ -562,8 +611,29 @@ impl App {
             .collect()
     }
 
-    fn open_list(&self, account: &str, folder: i64, threaded: bool, query: &str) -> u32 {
-        self.0.open_list(app::FolderKey { account: account.to_owned(), folder }, threaded, query)
+    fn open_list(&self, account: &str, folder: i64, threaded: bool, query: &str, filter: ListFilter) -> u32 {
+        let filter =
+            app::ListFilter { unread: filter.unread, flagged: filter.flagged, attachments: filter.attachments };
+        self.0.open_list(app::FolderKey { account: account.to_owned(), folder }, threaded, query, filter)
+    }
+
+    fn list_groups(&self) -> Vec<ListGroup> {
+        self.0
+            .list_groups()
+            .into_iter()
+            .map(|g| ListGroup {
+                start: g.start,
+                kind: match g.kind {
+                    app::DateGroup::Today => DateGroup::Today,
+                    app::DateGroup::Yesterday => DateGroup::Yesterday,
+                    app::DateGroup::ThisWeek => DateGroup::ThisWeek,
+                    app::DateGroup::LastWeek => DateGroup::LastWeek,
+                    app::DateGroup::Month => DateGroup::Month,
+                },
+                year: g.year,
+                month: g.month,
+            })
+            .collect()
     }
 
     fn close_list(&self) {

@@ -23,6 +23,8 @@ class QWebEngineProfile;
 
 namespace tern {
 
+class MessageBar;
+
 inline constexpr auto Scheme = "tern-msg";
 
 // Register the scheme; must run before QApplication is created.
@@ -91,6 +93,8 @@ Q_SIGNALS:
 private:
     void load();
     void updateHeaderView();
+    // "to Ann, Bob, +3", or every recipient when expanded.
+    void updateRecipients();
     void saveAttachment(quint32 index, const QString &filename);
     void openAttachment(quint32 index, const QString &filename);
     void showContextMenu(const QPoint &pos);
@@ -105,15 +109,22 @@ private:
 
     QWidget *m_header = nullptr;
     QLabel *m_subject = nullptr;
-    QLabel *m_meta = nullptr;
+    // Sender block: avatar, name, address, date, recipient summary.
+    QWidget *m_senderBlock = nullptr;
+    QLabel *m_avatar = nullptr;
+    QLabel *m_senderName = nullptr;
+    QLabel *m_senderEmail = nullptr;
+    QLabel *m_date = nullptr;
+    QLabel *m_recipients = nullptr;
+    bool m_recipientsExpanded = false;
     QTextBrowser *m_allHeaders = nullptr;
     QToolButton *m_headersButton = nullptr;
     QToolButton *m_sourceButton = nullptr;
-    QLabel *m_security = nullptr;
-    QWidget *m_remoteBar = nullptr;
+    MessageBar *m_securityBar = nullptr;
+    MessageBar *m_remoteBar = nullptr;
     QWidget *m_attachmentBar = nullptr;
     QHBoxLayout *m_attachmentLayout = nullptr;
-    QCheckBox *m_plain = nullptr;
+    QToolButton *m_plain = nullptr;
 };
 
 } // namespace tern

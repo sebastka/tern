@@ -1,5 +1,6 @@
 #include "messageview.h"
 
+#include "messagebar.h"
 #include "sourcewindow.h"
 
 #include <QBuffer>
@@ -23,6 +24,10 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QSignalBlocker>
+#include <QPainter>
+#include <QPainterPath>
+#include <QImageReader>
 #include <QScrollArea>
 #include <QStandardPaths>
 #include <QTextBrowser>
@@ -36,6 +41,8 @@
 #include <QWebEngineView>
 
 namespace tern {
+
+static QPixmap photo(const QByteArray &data, int size, qreal dpr);
 
 void registerUrlScheme()
 {
@@ -166,6 +173,13 @@ MessageView::MessageView(QWidget *parent) : QWidget(parent)
 
     m_page = new MessagePage(m_profile, this);
     connect(m_page, &MessagePage::mailtoClicked, this, &MessageView::mailtoClicked);
+    // A photo looked up in the background for the sender on screen.
+    connect(bridge(), &EventBridge::avatarReady, this, [this](const QString &email, const QByteArray &image) {
+        if (!m_view || email.compare(qs(m_view->sender.email), Qt::CaseInsensitive) != 0)
+            return;
+        if (const QPixmap pic = photo(image, 40, devicePixelRatioF()); !pic.isNull())
+            m_avatar->setPixmap(pic);
+    });
     m_web = new QWebEngineView(this);
     m_web->setPage(m_page);
     m_web->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -183,8 +197,15 @@ MessageView::MessageView(QWidget *parent) : QWidget(parent)
     m_subject->setFont(f);
     m_subject->setWordWrap(true);
     m_subject->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    m_plain = new QCheckBox(tr("Plain text"), m_header);
-    connect(m_plain, &QCheckBox::toggled, this, &MessageView::load);
+    // Same kind of control as Headers and Source: a toggle button.
+    m_plain = new QToolButton(m_header);
+    m_plain->setText(tr("Plain text"));
+    m_plain->setIcon(QIcon::fromTheme(QStringLiteral("text-plain"), QIcon::fromTheme(QStringLiteral("text-x-generic"))));
+    m_plain->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    m_plain->setAutoRaise(true);
+    m_plain->setCheckable(true);
+    m_plain->setToolTip(tr("Show the plain-text version"));
+    connect(m_plain, &QToolButton::toggled, this, &MessageView::load);
     m_headersButton = new QToolButton(m_header);
     m_headersButton->setText(tr("Headers"));
     m_headersButton->setIcon(QIcon::fromTheme(QStringLiteral("view-list-details")));
@@ -206,11 +227,57 @@ MessageView::MessageView(QWidget *parent) : QWidget(parent)
     top->addWidget(m_sourceButton, 0, Qt::AlignTop);
     top->addWidget(m_plain, 0, Qt::AlignTop);
     hl->addLayout(top);
-    m_meta = new QLabel(m_header);
-    m_meta->setTextFormat(Qt::RichText);
-    m_meta->setWordWrap(true);
-    m_meta->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    hl->addWidget(m_meta);
+
+    // Sender block: [avatar] Name ............ date
+    //                        address
+    //                        to Ann, Bob, +3
+    m_senderBlock = new QWidget(m_header);
+    auto *sl = new QHBoxLayout(m_senderBlock);
+    sl->setContentsMargins(0, 2, 0, 2);
+    sl->setSpacing(10);
+    m_avatar = new QLabel(m_senderBlock);
+    m_avatar->setFixedSize(40, 40);
+    sl->addWidget(m_avatar, 0, Qt::AlignTop);
+    auto *lines = new QVBoxLayout;
+    lines->setSpacing(1);
+    auto *nameRow = new QHBoxLayout;
+    m_senderName = new QLabel(m_senderBlock);
+    QFont nf = m_senderName->font();
+    nf.setBold(true);
+    nf.setPointSizeF(nf.pointSizeF() * 1.05);
+    m_senderName->setFont(nf);
+    m_senderName->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_date = new QLabel(m_senderBlock);
+    m_date->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    nameRow->addWidget(m_senderName, 1);
+    nameRow->addWidget(m_date, 0, Qt::AlignRight | Qt::AlignTop);
+    lines->addLayout(nameRow);
+    m_senderEmail = new QLabel(m_senderBlock);
+    m_senderEmail->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    lines->addWidget(m_senderEmail);
+    m_recipients = new QLabel(m_senderBlock);
+    m_recipients->setWordWrap(true);
+    m_recipients->setTextFormat(Qt::RichText);
+    m_recipients->setTextInteractionFlags(Qt::TextBrowserInteraction);
+    m_recipients->setOpenExternalLinks(false);
+    connect(m_recipients, &QLabel::linkActivated, this, [this](const QString &link) {
+        if (link == u"toggle") {
+            m_recipientsExpanded = !m_recipientsExpanded;
+            updateRecipients();
+        }
+    });
+    lines->addWidget(m_recipients);
+    sl->addLayout(lines, 1);
+    // Secondary lines in the palette's placeholder color, a bit smaller.
+    for (QLabel *l : {m_senderEmail, m_date, m_recipients}) {
+        QPalette p = l->palette();
+        p.setColor(QPalette::WindowText, p.color(QPalette::PlaceholderText));
+        l->setPalette(p);
+        QFont f = l->font();
+        f.setPointSizeF(f.pointSizeF() * 0.92);
+        l->setFont(f);
+    }
+    hl->addWidget(m_senderBlock);
     // Plain rich text only: no links are followed, no resources loaded.
     m_allHeaders = new QTextBrowser(m_header);
     m_allHeaders->setOpenLinks(false);
@@ -219,22 +286,17 @@ MessageView::MessageView(QWidget *parent) : QWidget(parent)
     m_allHeaders->setMaximumHeight(240);
     m_allHeaders->hide();
     hl->addWidget(m_allHeaders);
-    m_security = new QLabel(m_header);
-    m_security->setWordWrap(true);
-    m_security->setMargin(4);
-    m_security->setAutoFillBackground(true);
-    hl->addWidget(m_security);
+    m_securityBar = new MessageBar(m_header);
+    hl->addWidget(m_securityBar);
 
-    m_remoteBar = new QWidget(m_header);
-    auto *rl = new QHBoxLayout(m_remoteBar);
-    rl->setContentsMargins(0, 0, 0, 0);
-    rl->addWidget(new QLabel(tr("Remote content was blocked to protect your privacy."), m_remoteBar), 1);
+    m_remoteBar = new MessageBar(m_header);
+    m_remoteBar->setMessage(MessageBar::Information, tr("Remote content was blocked to protect your privacy."));
     auto *load = new QPushButton(tr("Load remote content"), m_remoteBar);
     connect(load, &QPushButton::clicked, this, [this] {
         if (m_key.valid())
             core().open_message(m_key.toFfi(), true);
     });
-    rl->addWidget(load);
+    m_remoteBar->addButton(load);
     hl->addWidget(m_remoteBar);
 
     m_attachmentBar = new QWidget(m_header);
@@ -279,7 +341,7 @@ void MessageView::updateHeaderView()
     const bool available = m_view && !m_view->headers.empty();
     const bool all = m_headersButton->isChecked() && available;
     m_allHeaders->setVisible(all);
-    m_meta->setVisible(!all);
+    m_senderBlock->setVisible(!all);
     m_headersButton->setEnabled(available);
     m_headersButton->setToolTip(available ? tr("Show all header fields")
                                           : tr("The header fields are shown once the message is downloaded"));
@@ -293,6 +355,120 @@ void MessageView::viewSource()
 
 static QString escaped(const QString &s) { return s.toHtmlEscaped(); }
 
+// Initials on a circle whose color is derived from the address, so a
+// sender keeps the same color everywhere.
+static QPixmap avatar(const QString &name, const QString &email, int size, qreal dpr)
+{
+    QString initials;
+    for (const QString &word : name.split(u' ', Qt::SkipEmptyParts)) {
+        const QChar c = word.front();
+        if (c.isLetterOrNumber())
+            initials += c.toUpper();
+        if (initials.size() == 2)
+            break;
+    }
+    if (initials.isEmpty() && !email.isEmpty())
+        initials = email.front().toUpper();
+    const int hue = static_cast<int>(qHash(email.toLower()) % 360);
+    QPixmap pm(QSize(size, size) * dpr);
+    pm.setDevicePixelRatio(dpr);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setPen(Qt::NoPen);
+    p.setBrush(QColor::fromHsv(hue, 110, 175));
+    p.drawEllipse(QRectF(0, 0, size, size));
+    QFont f = p.font();
+    f.setBold(true);
+    f.setPixelSize(size * 2 / 5);
+    p.setFont(f);
+    p.setPen(Qt::white);
+    p.drawText(QRectF(0, 0, size, size), Qt::AlignCenter, initials);
+    return pm;
+}
+
+// A sender photo (PNG/JPEG/GIF, checked by the core) cropped to a circle.
+// Null if it can't be decoded or claims absurd dimensions (a small file
+// can still decode to gigabytes).
+static QPixmap photo(const QByteArray &data, int size, qreal dpr)
+{
+    QBuffer buffer;
+    buffer.setData(data);
+    buffer.open(QIODevice::ReadOnly);
+    QImageReader reader(&buffer);
+    const QSize natural = reader.size();
+    if (!natural.isValid() || natural.width() > 4096 || natural.height() > 4096)
+        return {};
+    const int px = qRound(size * dpr);
+    // Cover the circle: scale the short side to it while decoding.
+    reader.setScaledSize(natural.scaled(px, px, Qt::KeepAspectRatioByExpanding));
+    const QImage img = reader.read();
+    if (img.isNull())
+        return {};
+    QPixmap pm(px, px);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setRenderHint(QPainter::SmoothPixmapTransform);
+    QPainterPath circle;
+    circle.addEllipse(QRectF(0, 0, px, px));
+    p.setClipPath(circle);
+    p.drawImage(QPointF((px - img.width()) / 2.0, (px - img.height()) / 2.0), img);
+    p.end();
+    pm.setDevicePixelRatio(dpr);
+    return pm;
+}
+
+static QString personText(const ffi::Person &p, bool withAddress)
+{
+    const QString name = qs(p.name), email = qs(p.email);
+    if (name.isEmpty())
+        return escaped(email);
+    return withAddress ? QStringLiteral("%1 &lt;%2&gt;").arg(escaped(name), escaped(email)) : escaped(name);
+}
+
+void MessageView::updateRecipients()
+{
+    if (!m_view)
+        return;
+    const auto &to = m_view->to_people;
+    const auto &cc = m_view->cc_people;
+    const qsizetype total = static_cast<qsizetype>(to.size() + cc.size());
+    if (total == 0) {
+        m_recipients->setText(QString());
+        return;
+    }
+    QString html;
+    if (m_recipientsExpanded) {
+        QStringList t, c;
+        for (const auto &p : to)
+            t << personText(p, true);
+        for (const auto &p : cc)
+            c << personText(p, true);
+        if (!t.isEmpty())
+            html += tr("To: %1").arg(t.join(QStringLiteral(", ")));
+        if (!c.isEmpty())
+            html += (html.isEmpty() ? QString() : QStringLiteral("<br>")) + tr("Cc: %1").arg(c.join(QStringLiteral(", ")));
+        html += QStringLiteral(" &nbsp;<a href=\"toggle\">%1</a>").arg(tr("less"));
+    } else {
+        // Up to two names, then a count; the link shows everything.
+        QStringList names;
+        for (const auto &p : to)
+            if (names.size() < 2)
+                names << personText(p, false);
+        for (const auto &p : cc)
+            if (names.size() < 2)
+                names << personText(p, false);
+        html = tr("to %1").arg(names.join(QStringLiteral(", ")));
+        const qsizetype more = total - names.size();
+        if (more > 0)
+            html += QStringLiteral(", <a href=\"toggle\">%1</a>").arg(tr("+%1 more").arg(more));
+        else
+            html += QStringLiteral(" &nbsp;<a href=\"toggle\">%1</a>").arg(tr("details"));
+    }
+    m_recipients->setText(html);
+}
+
 void MessageView::showMessage(const std::shared_ptr<ffi::MessageView> &view)
 {
     const Key key = Key::from(view->key);
@@ -302,15 +478,28 @@ void MessageView::showMessage(const std::shared_ptr<ffi::MessageView> &view)
     m_header->show();
 
     m_subject->setText(qs(view->subject).isEmpty() ? tr("(no subject)") : qs(view->subject));
-    QString meta = QStringLiteral("<b>%1</b> %2").arg(tr("From:"), escaped(qs(view->from)));
-    if (!view->to.empty())
-        meta += QStringLiteral("<br><b>%1</b> %2").arg(tr("To:"), escaped(qs(view->to)));
-    if (!view->cc.empty())
-        meta += QStringLiteral("<br><b>%1</b> %2").arg(tr("Cc:"), escaped(qs(view->cc)));
-    meta += QStringLiteral("<br><b>%1</b> %2")
-                .arg(tr("Date:"),
-                     QLocale().toString(QDateTime::fromSecsSinceEpoch(view->date).toLocalTime(), QLocale::LongFormat));
-    m_meta->setText(meta);
+    const QString senderName = qs(view->sender.name), senderEmail = qs(view->sender.email);
+    // Fall back to the raw From text if the sender couldn't be parsed.
+    m_senderName->setText(!senderName.isEmpty() ? senderName
+                          : !senderEmail.isEmpty() ? senderEmail
+                                                   : qs(view->from));
+    m_senderEmail->setText(senderName.isEmpty() ? QString() : senderEmail);
+    m_senderEmail->setVisible(!senderName.isEmpty() && !senderEmail.isEmpty());
+    // The sender's photo if the core has one (`[avatars]`), else initials.
+    const QPixmap pic = view->avatar.empty()
+                            ? QPixmap()
+                            : photo(QByteArray(reinterpret_cast<const char *>(view->avatar.data()),
+                                               static_cast<qsizetype>(view->avatar.size())),
+                                    40, devicePixelRatioF());
+    m_avatar->setPixmap(!pic.isNull() ? pic
+                                      : avatar(senderName, senderEmail.isEmpty() ? qs(view->from) : senderEmail, 40,
+                                               devicePixelRatioF()));
+    const QDateTime when = QDateTime::fromSecsSinceEpoch(view->date).toLocalTime();
+    m_date->setText(QLocale().toString(when, QLocale::ShortFormat));
+    m_date->setToolTip(QLocale().toString(when, QLocale::LongFormat));
+    if (!sameMessage)
+        m_recipientsExpanded = false;
+    updateRecipients();
 
     QString all = QStringLiteral("<table cellspacing='0' cellpadding='1'>");
     for (const auto &h : view->headers)
@@ -320,44 +509,37 @@ void MessageView::showMessage(const std::shared_ptr<ffi::MessageView> &view)
     m_allHeaders->setHtml(all);
     updateHeaderView();
 
-    // Security banner: encryption and signature state, as decided in Rust.
+    // Security bar: encryption and signature state, as decided in Rust.
     QString sec;
-    QColor bg;
+    MessageBar::Kind kind = MessageBar::Information;
     if (view->decryption_failed) {
         sec = tr("This message is encrypted and could not be decrypted.");
-        bg = QColor(0xf8, 0xd7, 0xda);
+        kind = MessageBar::Error;
     } else {
         QStringList parts;
         if (view->encrypted)
             parts << tr("Encrypted");
         switch (view->signature) {
         case ffi::SignatureState::Good:
-            bg = QColor(0xd4, 0xed, 0xda);
+            kind = MessageBar::Positive;
             break;
         case ffi::SignatureState::Warning:
         case ffi::SignatureState::Unknown:
-            bg = QColor(0xff, 0xf3, 0xcd);
+            kind = MessageBar::Warning;
             break;
         case ffi::SignatureState::Bad:
-            bg = QColor(0xf8, 0xd7, 0xda);
+            kind = MessageBar::Error;
             break;
         default:
-            if (view->encrypted)
-                bg = QColor(0xd1, 0xec, 0xf1);
             break;
         }
         if (!view->signature_text.empty())
             parts << qs(view->signature_text);
         sec = parts.join(QStringLiteral(" — "));
     }
-    m_security->setVisible(!sec.isEmpty());
-    if (!sec.isEmpty()) {
-        m_security->setText(sec);
-        QPalette pal = m_security->palette();
-        pal.setColor(QPalette::Window, bg);
-        pal.setColor(QPalette::WindowText, Qt::black);
-        m_security->setPalette(pal);
-    }
+    m_securityBar->setVisible(!sec.isEmpty());
+    if (!sec.isEmpty())
+        m_securityBar->setMessage(kind, sec);
 
     m_remoteBar->setVisible(view->has_remote_content && !view->remote_allowed);
 
@@ -388,9 +570,19 @@ void MessageView::showMessage(const std::shared_ptr<ffi::MessageView> &view)
     m_attachmentLayout->addStretch(1);
     m_attachmentBar->setVisible(!view->attachments.empty());
 
-    if (!sameMessage)
-        m_plain->setChecked(false);
-    m_plain->setEnabled(view->has_html);
+    {
+        // A new message starts from `prefer_plain_text`; the button switches
+        // between the two versions (HTML stays reachable). No load() from
+        // the toggled signal here: it's called once below.
+        const QSignalBlocker block(m_plain);
+        if (!sameMessage)
+            m_plain->setChecked(view->has_html && core().prefer_plain_text());
+        if (!view->has_html)
+            m_plain->setChecked(false);
+        m_plain->setEnabled(view->has_html);
+        m_plain->setToolTip(view->has_html ? tr("Show the plain-text version")
+                                           : tr("This message has no HTML version"));
+    }
     load();
 }
 

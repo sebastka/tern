@@ -105,7 +105,8 @@ Message-ID: <w@example.org>\r\nDate: Sat, 04 Oct 2026 10:00:00 +0000\r\nContent-
     let inbox = tree.iter().find(|n| n.role == "inbox").expect("inbox in tree");
     assert_eq!(inbox.unread, 1);
 
-    let count = env.app.open_list(FolderKey { account: "local".into(), folder: inbox.folder }, true, "");
+    let count =
+        env.app.open_list(FolderKey { account: "local".into(), folder: inbox.folder }, true, "", Default::default());
     assert_eq!(count, 1);
     let rows = env.app.list_rows(0, 50);
     assert_eq!(rows[0].subject, "Welcome");

@@ -43,12 +43,21 @@ public:
     int sectionOf(Column column) const { return static_cast<int>(m_columns.indexOf(column)); }
 
     // Switch to a folder (empty account = no list).
-    void open(const QString &account, qint64 folder, bool threaded, const QString &query, bool showRecipients);
+    void open(const QString &account, qint64 folder, bool threaded, const QString &query, bool showRecipients,
+              ffi::ListFilter filter);
     // The core reports the list changed: reset, keeping no stale rows.
     void reload(quint32 count);
 
+    // View rows include date section headers ("Today", "Last week"...);
+    // the core numbers messages only. These convert between the two.
     const Row *rowAt(int row) const;
     Key keyAt(int row) const;
+    // -1 for a section header.
+    qint64 coreIndex(int row) const;
+    // -1 if out of range.
+    int viewRow(qint64 coreIndex) const;
+    // View rows of section headers (to span them across all columns).
+    const QList<int> &headerRows() const { return m_headers; }
 
     int rowCount(const QModelIndex &parent = {}) const override;
     int columnCount(const QModelIndex &parent = {}) const override;
@@ -65,8 +74,15 @@ private:
     static constexpr int PageSize = 128;
     static constexpr int MaxPages = 32;
 
+    void loadGroups();
+
     quint32 m_count = 0;
     bool m_showRecipients = false;
+    // Section headers: their view rows (ascending), the core index of their
+    // first message, and their labels.
+    QList<int> m_headers;
+    QList<qint64> m_groupStarts;
+    QStringList m_headerLabels;
     QList<Column> m_columns{Column::Flag, Column::Subject, Column::Correspondent, Column::Date, Column::Attachment};
     // page index → rows. Mutable: filled lazily from const data().
     mutable QHash<int, QList<Row>> m_pages;

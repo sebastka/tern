@@ -1,6 +1,7 @@
 #include "mainwindow.h"
 
 #include "composewindow.h"
+#include "delegates.h"
 #include "messagelistmodel.h"
 #include "messageview.h"
 #include "sound.h"
@@ -49,6 +50,9 @@ MainWindow::MainWindow(const QString &profile, QWidget *parent) : QMainWindow(pa
     m_folders->setModel(m_folderModel);
     m_folders->setHeaderHidden(true);
     m_folders->setUniformRowHeights(true);
+    // Unread counts as badges; a lighter indent for deep hierarchies.
+    m_folders->setItemDelegate(new BadgeDelegate(FolderModel::UnreadRole, m_folders));
+    m_folders->setIndentation(14);
     m_folders->setDragDropMode(QAbstractItemView::DropOnly);
     m_folders->setDropIndicatorShown(true);
     m_folders->setDefaultDropAction(Qt::MoveAction);
@@ -69,6 +73,11 @@ MainWindow::MainWindow(const QString &profile, QWidget *parent) : QMainWindow(pa
     m_list->header()->setSectionsMovable(false);
     connect(m_list->selectionModel(), &QItemSelectionModel::currentChanged, this, &MainWindow::messageActivated);
     connect(m_list->selectionModel(), &QItemSelectionModel::selectionChanged, this, &MainWindow::updateActions);
+    // Date section headers span the whole row.
+    connect(m_listModel, &QAbstractItemModel::modelReset, this, [this] {
+        for (const int row : m_listModel->headerRows())
+            m_list->setFirstColumnSpanned(row, {}, true);
+    });
 
     m_view = new MessageView(this);
     connect(m_view, &MessageView::mailtoClicked, this, &MainWindow::openMailto);
@@ -205,6 +214,22 @@ void MainWindow::createActions()
     auto *spacer = new QWidget(this);
     spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     tb->addWidget(spacer);
+    // Quick filters: combine with each other and with the search text.
+    auto filter = [this, tb](const QString &icon, const QString &text, const QString &tip, bool ffi::ListFilter::*field) {
+        auto *a = new QAction(QIcon::fromTheme(icon), text, this);
+        a->setCheckable(true);
+        a->setToolTip(tip);
+        connect(a, &QAction::toggled, this, [this, field](bool on) {
+            m_filter.*field = on;
+            reopenList();
+        });
+        tb->addAction(a);
+        return a;
+    };
+    filter(QStringLiteral("mail-unread"), tr("Unread"), tr("Show only unread messages"), &ffi::ListFilter::unread);
+    filter(QStringLiteral("flag"), tr("Flagged"), tr("Show only flagged messages"), &ffi::ListFilter::flagged);
+    filter(QStringLiteral("mail-attachment"), tr("Attachments"), tr("Show only messages with attachments"),
+           &ffi::ListFilter::attachments);
     tb->addWidget(m_search);
     auto *focusSearch = new QAction(this);
     focusSearch->setShortcut(QKeySequence::Find);
@@ -470,7 +495,9 @@ void MainWindow::saveListPosition()
     if (m_folder.account.isEmpty() || !m_search->text().isEmpty())
         return;
     const QModelIndex top = m_list->indexAt(QPoint(0, 0));
-    const Key topKey = top.isValid() ? m_listModel->keyAt(top.row()) : Key{};
+    // A date section header at the top: anchor on the message below it.
+    const int topRow = top.isValid() && m_listModel->coreIndex(top.row()) < 0 ? top.row() + 1 : top.row();
+    const Key topKey = top.isValid() ? m_listModel->keyAt(topRow) : Key{};
     const Key current = currentKey();
     const QScrollBar *bar = m_list->verticalScrollBar();
     // At the end (newest mail when sorted ascending): stay at the end, so
@@ -512,7 +539,7 @@ void MainWindow::restoreListPosition()
             if (saved[2] == u"end") {
                 m_list->scrollToBottom();
             } else if (const qint64 row = rowOf(saved[0]); row >= 0) {
-                m_list->scrollTo(m_listModel->index(static_cast<int>(row), 0), QAbstractItemView::PositionAtTop);
+                m_list->scrollTo(m_listModel->index(m_listModel->viewRow(row), 0), QAbstractItemView::PositionAtTop);
             }
         }
         if (showRow >= 0)
@@ -550,7 +577,7 @@ void MainWindow::reopenList()
 {
     const QString role = m_folderModel->data(m_folderModel->indexOf(m_folder), FolderModel::FolderRoleName).toString();
     const bool outgoing = role == u"sent" || role == u"drafts";
-    m_listModel->open(m_folder.account, m_folder.folder, m_threaded, m_search->text(), outgoing);
+    m_listModel->open(m_folder.account, m_folder.folder, m_threaded, m_search->text(), outgoing, m_filter);
     const Key shown = m_view->currentKey();
     if (shown.valid()) {
         const qint64 row = core().list_index_of(shown.toFfi());
@@ -567,7 +594,7 @@ void MainWindow::listChanged(quint32 count)
     // Keep the current message selected across the reset; if it's gone
     // (moved or deleted), select the message that took its place.
     const Key current = currentKey();
-    const int oldRow = m_list->currentIndex().row();
+    const qint64 oldRow = m_listModel->coreIndex(m_list->currentIndex().row());
     const QList<Key> selected = selectedKeys();
     m_listModel->reload(count);
     if (!current.valid())
@@ -578,11 +605,11 @@ void MainWindow::listChanged(quint32 count)
         for (const Key &k : selected) {
             const qint64 r = core().list_index_of(k.toFfi());
             if (r >= 0 && k != current)
-                m_list->selectionModel()->select(m_listModel->index(static_cast<int>(r), 0),
+                m_list->selectionModel()->select(m_listModel->index(m_listModel->viewRow(r), 0),
                                                  QItemSelectionModel::Select | QItemSelectionModel::Rows);
         }
     } else if (count > 0 && oldRow >= 0) {
-        selectRow(qMin(oldRow, static_cast<int>(count) - 1), true);
+        selectRow(static_cast<int>(qMin<qint64>(oldRow, count - 1)), true);
     } else {
         m_view->clear();
     }
@@ -591,8 +618,9 @@ void MainWindow::listChanged(quint32 count)
 
 void MainWindow::selectRow(int row, bool open)
 {
+    // `row` is a core index; the view also has date section header rows.
     const int column = qMax(0, m_listModel->sectionOf(MessageListModel::Column::Subject));
-    const QModelIndex idx = m_listModel->index(row, column);
+    const QModelIndex idx = m_listModel->index(m_listModel->viewRow(row), column);
     m_restoring = !open;
     m_list->selectionModel()->setCurrentIndex(idx, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
     m_restoring = false;

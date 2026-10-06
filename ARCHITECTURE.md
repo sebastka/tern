@@ -250,7 +250,7 @@ nature.
 | Config | `$XDG_CONFIG_HOME/tern/` | User-authored settings |
 | **Mail store** (messages, metadata, drafts, outbox) | `$XDG_DATA_HOME/tern/profiles/<p>/` | Irreplaceable user data: unsent mail and offline changes |
 | UI state, logs, last-used profile | `$XDG_STATE_HOME/tern/` | Persistent but unimportant, as the spec defines it |
-| Search index, rendered HTML, remote-image cache | `$XDG_CACHE_HOME/tern/profiles/<p>/` | Can be regenerated at any time |
+| Sender avatars (`avatars/`); later the full-text search index (§13). Rendered messages stay in memory. | `$XDG_CACHE_HOME/tern/profiles/<p>/` | Can be regenerated at any time |
 | Locks, IPC sockets | `$XDG_RUNTIME_DIR/tern/` | Lives only for the session |
 
 > Why not `$XDG_STATE_HOME` for mail? The spec reserves STATE for data that is

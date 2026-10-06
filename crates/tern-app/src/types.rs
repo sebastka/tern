@@ -61,6 +61,44 @@ pub enum ListColumn {
     Size,
 }
 
+/// Quick filters of the message list; all off shows everything. With any
+/// on, the list is flat (like search results).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ListFilter {
+    pub unread: bool,
+    pub flagged: bool,
+    pub attachments: bool,
+}
+
+impl ListFilter {
+    pub fn any(&self) -> bool {
+        self.unread || self.flagged || self.attachments
+    }
+}
+
+/// A date section of the message list (when sorted by date).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DateGroup {
+    Today,
+    Yesterday,
+    /// Earlier this week (weeks start on Monday).
+    ThisWeek,
+    LastWeek,
+    /// A calendar month: `year` and `month` of [`ListGroup`].
+    Month,
+}
+
+/// A section header in the message list, before row `start`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ListGroup {
+    /// Index of the first row (in `list_rows` numbering) of the section.
+    pub start: u32,
+    pub kind: DateGroup,
+    /// For `Month`; 0 otherwise.
+    pub year: i32,
+    pub month: u32,
+}
+
 /// Message list columns and order, as configured.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListLayout {
@@ -111,6 +149,13 @@ pub struct AttachmentInfo {
     pub filename: String,
     pub content_type: String,
     pub size: u64,
+}
+
+/// A sender or recipient, for display (name may be empty).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Person {
+    pub name: String,
+    pub email: String,
 }
 
 /// One header field, for the extended header view.
@@ -179,6 +224,13 @@ pub struct MessageView {
     pub signature_text: String,
     /// All header fields in order (empty while the body is missing).
     pub headers: Vec<HeaderField>,
+    /// Structured sender and recipients, for the header pane.
+    pub sender: Person,
+    pub to_people: Vec<Person>,
+    pub cc_people: Vec<Person>,
+    /// Sender picture (PNG/JPEG/GIF), empty if none; see `[avatars]`. A
+    /// lookup started for this message arrives as `Event::AvatarReady`.
+    pub avatar: Vec<u8>,
     /// Body not downloaded yet (header-only sync so far).
     pub body_missing: bool,
 }
@@ -317,6 +369,12 @@ pub enum Event {
     /// Another `tern` process asked this one to show itself.
     RaiseWindow {
         activation_token: String,
+    },
+    /// A sender picture was found (PNG/JPEG/GIF); show it if `email` is the
+    /// sender of the message on screen.
+    AvatarReady {
+        email: String,
+        image: Vec<u8>,
     },
     /// Play a sound from the freedesktop sound theme (an event id such as
     /// `message-new-email`).

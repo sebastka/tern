@@ -198,7 +198,7 @@ sent_folder = "Sent"                # default for all profiles (top-level, above
 
 [ui]
 threaded = true
-prefer_plain_text = false
+prefer_plain_text = false           # open messages that have both in plain text (the Plain text button switches)
 
 [ui.message_list]
 # Left to right: flag, subject, from, to, correspondent, date, attachment, size.
@@ -206,6 +206,7 @@ prefer_plain_text = false
 columns = ["flag", "subject", "correspondent", "date", "attachment"]   # not empty, no duplicates
 sort_by = "date"                    # any of the above; it doesn't have to be shown
 sort_order = "desc"                 # asc | desc
+group_by_date = true                # "Today", "Yesterday", "Last week", months… when sorted by date
 
 [gpg]
 program = "gpg"
@@ -217,6 +218,10 @@ format = "plain"                    # default editor: plain | markdown | html (n
 [memory]
 message_cache_mb = 64               # rendered messages kept in memory, attachments included; 1–4096
 spare_renderer = true               # keep a spare web renderer ready (newer Qt only; restart to apply)
+
+[avatars]                           # sender pictures in the message header (initials otherwise)
+lookup = "off"                      # off | trusted | all
+sources = ["webfinger", "libravatar"]   # tried in this order
 
 [notifications]                     # also in profile.toml or an account file; most specific wins, per key
 enabled = true                      # desktop notification for new unread mail
@@ -252,6 +257,22 @@ exclude_folders = ["Junk", "Trash", "Lists/*"]
 Each key is taken from the most specific file that sets it, and lists are
 not merged: an account's `exclude_folders` replaces the one in tern.toml.
 
+Looking up a sender's picture tells their domain (or the avatar service)
+that you opened their mail, so `[avatars]` is off by default. `trusted`
+looks up only senders whose remote content you allow (`allow_senders`, or
+after "Load remote content"); `all` looks up every sender. Each address is
+looked up at most about once a month (once a week if nothing was found);
+pictures are cached in `~/.cache/tern/profiles/<profile>/avatars/`.
+
+- `webfinger`: the sender's domain, `/.well-known/webfinger` (RFC 7033), its
+  `http://webfinger.net/rel/avatar` link.
+- `libravatar`: the domain's own Libravatar server if it publishes an
+  `_avatars-sec._tcp` SRV record, else libravatar.org (which falls back to
+  Gravatar).
+
+Only HTTPS is used, and only PNG, JPEG and GIF pictures up to 512 KiB are
+accepted.
+
 New mail is announced through the freedesktop notification service, so it
 works on any desktop (Plasma, GNOME, or Hyprland with mako, dunst, swaync…).
 Clicking a notification opens the message. Only unread messages that arrive
@@ -259,6 +280,12 @@ after a folder's first sync count, so the initial download stays quiet. The
 sound is played by Tern itself (through libcanberra), from the freedesktop
 sound theme: `message-new-email`, falling back to the theme's general
 `message` sound. `enabled` and `sound` are independent: either can be off.
+
+The **Unread**, **Flagged** and **Attachments** buttons next to the search
+field filter the list; they combine with each other and with the search text.
+While a filter is on, the list is flat, and messages stay in it until you
+change folder or filter, so a message you open doesn't vanish when it's
+marked as read.
 
 In threaded view, `sort_by` orders whole threads. Numeric fields (date, size,
 flag, attachment) use the thread's highest value, so `date` means the newest
@@ -287,6 +314,7 @@ new message switches to that account's signature and mode.
 |---|---|
 | Mail, index, outbox | `~/.local/share/tern/profiles/<profile>/<account>/` |
 | Logs, window layout, last profile | `~/.local/state/tern/` |
+| Sender avatars (`[avatars]`) | `~/.cache/tern/profiles/<profile>/avatars/` |
 | Lock files | `$XDG_RUNTIME_DIR/tern/` |
 
 Set `TERN_LOG=debug` for verbose logs, and `TERN_LOG_STDERR=1` to also log to

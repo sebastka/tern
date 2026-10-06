@@ -66,6 +66,11 @@ public:
     {
         post([t = qs(token)](EventBridge *b) { Q_EMIT b->raiseWindow(t); });
     }
+    void avatar_ready(rust::String email, rust::Vec<std::uint8_t> image) const override
+    {
+        QByteArray data(reinterpret_cast<const char *>(image.data()), static_cast<qsizetype>(image.size()));
+        post([e = qs(email), d = std::move(data)](EventBridge *b) { Q_EMIT b->avatarReady(e, d); });
+    }
     void play_sound(rust::String sound) const override
     {
         post([s = qs(sound)](EventBridge *b) { Q_EMIT b->playSound(s); });

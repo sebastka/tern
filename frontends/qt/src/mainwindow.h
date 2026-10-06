@@ -55,6 +55,7 @@ private:
 
     QList<Key> selectedKeys() const;
     Key currentKey() const;
+    // `row` is a core index (as from list_index_of), not a view row.
     void selectRow(int row, bool open);
 
     void compose();
@@ -93,6 +94,8 @@ private:
 
     FolderId m_folder;
     bool m_threaded = true;
+    // Quick filters (session only).
+    ffi::ListFilter m_filter{false, false, false};
     bool m_initialSelectionDone = false;
     bool m_restoring = false;
     // Message to select once the list of its folder is open (notification).

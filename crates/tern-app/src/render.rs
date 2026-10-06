@@ -7,13 +7,14 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock};
 
 use mail_parser::{Message, MessageParser, MimeHeaders, PartType};
 use regex::Regex;
 use tern_pgp::{Gpg, Signature, Trust};
 
-use crate::types::{AttachmentInfo, SignatureState};
+use crate::types::{AttachmentInfo, Person, SignatureState};
 
 /// Everything produced from one message, cached by the app for the scheme
 /// handler, attachment saving and reply quoting.
@@ -25,6 +26,10 @@ pub struct Rendered {
     pub cc: String,
     pub date: i64,
     pub from_address: String,
+    /// First sender, and the recipients, as name + address.
+    pub sender: Person,
+    pub to_people: Vec<Person>,
+    pub cc_people: Vec<Person>,
     /// Sanitized HTML document, if the message has an HTML part.
     pub html_doc: Option<String>,
     /// Plain text rendered as an HTML document.
@@ -144,6 +149,18 @@ fn signature_state(sig: &Signature) -> (SignatureState, String) {
     }
 }
 
+/// Addresses as name + address (entries without an address are skipped).
+fn people(a: Option<&mail_parser::Address<'_>>) -> Vec<Person> {
+    a.map(|a| {
+        a.iter()
+            .filter_map(|x| {
+                Some(Person { name: x.name().unwrap_or_default().trim().to_owned(), email: x.address()?.to_owned() })
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
 fn addr_list(a: Option<&mail_parser::Address<'_>>) -> (String, Vec<String>) {
     let Some(a) = a else { return (String::new(), Vec::new()) };
     let items: Vec<(String, String)> = a
@@ -218,6 +235,9 @@ pub async fn render(raw: &[u8], opts: &RenderOptions<'_>) -> Rendered {
     r.from_address = outer.from().and_then(|a| a.first()).and_then(|a| a.address()).unwrap_or("").to_owned();
     (r.to, r.to_list) = addr_list(outer.to());
     (r.cc, r.cc_list) = addr_list(outer.cc());
+    r.sender = people(outer.from()).into_iter().next().unwrap_or_default();
+    r.to_people = people(outer.to());
+    r.cc_people = people(outer.cc());
     // Quoted form: display names may contain commas.
     r.reply_to = addr_list(outer.reply_to().or(outer.from())).1.join(", ");
     r.references = match outer.references() {
@@ -357,8 +377,8 @@ pub async fn render(raw: &[u8], opts: &RenderOptions<'_>) -> Rendered {
         })
         .filter(|_| !r.decryption_failed && !inline_pgp);
     if let Some(html) = html {
-        let clean = sanitize(&html, &opts.url_base);
-        r.has_remote_content = REMOTE.is_match(&clean);
+        let (clean, blocked_images) = sanitize(&html, &opts.url_base, !opts.allow_remote);
+        r.has_remote_content = blocked_images || REMOTE.is_match(&clean);
         r.html_doc = Some(html_document(&clean, opts.allow_remote));
     }
     r.text = text;
@@ -440,8 +460,20 @@ static REMOTE: LazyLock<Regex> = LazyLock::new(|| {
 /// Sanitize HTML with ammonia. Inline styles and `<style>` are kept (no JS can
 /// run and remote loads are blocked separately); `cid:` references are
 /// rewritten to the message's `tern-msg:` URL.
-pub fn sanitize(html: &str, url_base: &str) -> String {
+/// Stands in for a remote image while remote content is blocked: empty, so
+/// no broken-image icon or alt text upsets the layout; the document's style
+/// draws a light box at the image's own `width`/`height`. The SVG has no size
+/// of its own, so those attributes (not a 1:1 ratio) decide its shape.
+const BLOCKED_IMAGE: &str =
+    "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20id%3D%22tern-blocked%22%2F%3E";
+
+/// Sanitize HTML mail. With `block_images`, remote `<img>` sources are
+/// replaced by [`BLOCKED_IMAGE`]; the second value tells whether that
+/// happened (remote content to offer loading).
+pub fn sanitize(html: &str, url_base: &str, block_images: bool) -> (String, bool) {
     let base = url_base.to_owned();
+    let blocked = Arc::new(AtomicBool::new(false));
+    let saw_remote = blocked.clone();
     let mut b = ammonia::Builder::default();
     b.add_tags(["style", "center", "font"])
         .rm_clean_content_tags(["style"])
@@ -464,15 +496,21 @@ pub fn sanitize(html: &str, url_base: &str) -> String {
         .url_schemes(["http", "https", "mailto", "cid", "data"].into_iter().collect())
         .link_rel(Some("noopener noreferrer"))
         .strip_comments(true)
-        .attribute_filter(move |_el, attr, value| {
+        .attribute_filter(move |el, attr, value| {
             if matches!(attr, "src" | "background")
                 && let Some(cid) = value.trim().strip_prefix("cid:")
             {
                 return Some(format!("{base}/cid/{}", percent(cid)).into());
             }
+            let remote = value.trim_start().get(..4).is_some_and(|s| s.eq_ignore_ascii_case("http"));
+            if block_images && el == "img" && attr == "src" && remote {
+                saw_remote.store(true, Ordering::Relaxed);
+                return Some(BLOCKED_IMAGE.into());
+            }
             Some(value.into())
         });
-    b.clean(html).to_string()
+    let clean = b.clean(html).to_string();
+    (clean, blocked.load(Ordering::Relaxed))
 }
 
 fn percent(s: &str) -> String {
@@ -510,7 +548,12 @@ fn html_document(body: &str, allow_remote: bool) -> String {
 <meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; \
 style-src 'unsafe-inline' tern-msg: data:{remote}; img-src tern-msg: data:{remote}; \
 font-src tern-msg: data:{remote}\">\
-<style>html{{color-scheme:light;background:#fff;color:#000}}body{{margin:8px;font-family:sans-serif;overflow-wrap:anywhere}}img{{max-width:100%;height:auto}}</style>\
+<style>html{{color-scheme:light;background:#fff;color:#000}}\
+body{{margin:8px;font-family:sans-serif;overflow-wrap:break-word}}\
+img{{max-width:100%;height:auto}}\
+img[src*=\"tern-blocked\"]{{background:#eef0f2;border-radius:2px}}\
+img[src*=\"tern-blocked\"]:not([height]){{aspect-ratio:1;max-height:4em}}\
+img[src*=\"tern-blocked\"]:not([width]):not([height]):not([style*=width]):not([style*=height]){{display:none}}</style>\
 </head><body>{body}</body></html>"
     )
 }
@@ -547,7 +590,7 @@ pub fn text_document(text: &str) -> String {
     format!(
         "<!DOCTYPE html><html><head><meta charset=\"utf-8\">\
 <meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'\">\
-<style>:root{{color-scheme:light dark}}body{{margin:8px}}\
+<style>:root{{color-scheme:light dark}}body{{margin:8px auto;padding:0 12px;max-width:82ch}}\
 pre{{white-space:pre-wrap;overflow-wrap:anywhere;font-family:monospace;font-size:10pt;margin:0}}\
 .q1{{color:#2a6fb0}}.q2{{color:#3c8c3c}}.q3{{color:#9c6b1d}}</style>\
 </head><body><pre>{body}</pre></body></html>"
@@ -568,12 +611,34 @@ mod tests {
     #[test]
     fn sanitizing() {
         let html = r#"<p onclick="x()">Hi<script>alert(1)</script><img src="cid:logo@x"><img src="https://t.example/p.gif"><style>p{color:red}</style><a href="javascript:x">j</a></p>"#;
-        let clean = sanitize(html, "tern-msg:/acc/5");
+        let (clean, blocked) = sanitize(html, "tern-msg:/acc/5", false);
         assert!(!clean.contains("script") && !clean.contains("onclick") && !clean.contains("javascript"));
         assert!(clean.contains(r#"src="tern-msg:/acc/5/cid/logo@x""#), "{clean}");
         assert!(clean.contains("p{color:red}"));
-        assert!(REMOTE.is_match(&clean));
-        assert!(!REMOTE.is_match(&sanitize("<p style=\"color:red\">x</p>", "b")));
+        assert!(REMOTE.is_match(&clean) && !blocked);
+        assert!(!REMOTE.is_match(&sanitize("<p style=\"color:red\">x</p>", "b", true).0));
+    }
+
+    #[test]
+    fn blocked_images_keep_their_size() {
+        let html = r#"<img src="https://x.example/a.png" alt="Advisories" width="24" height="24"><img src="cid:logo">"#;
+        let (clean, blocked) = sanitize(html, "tern-msg:/acc/5", true);
+        assert!(blocked);
+        assert!(!clean.contains("x.example"), "{clean}");
+        assert!(
+            clean.contains(BLOCKED_IMAGE) && clean.contains(r#"width="24""#) && clean.contains("alt=\"Advisories\"")
+        );
+        // Local images are untouched.
+        assert!(clean.contains("tern-msg:/acc/5/cid/logo"));
+        // Nothing to block: no "load remote content" offer.
+        assert!(!sanitize(r#"<img src="cid:logo">"#, "b", true).1);
+    }
+
+    #[test]
+    fn document_style_keeps_table_columns() {
+        // `overflow-wrap: anywhere` shrank table columns to one letter.
+        let doc = html_document("<p>x</p>", false);
+        assert!(doc.contains("overflow-wrap:break-word") && !doc.contains("anywhere"));
     }
 
     #[test]

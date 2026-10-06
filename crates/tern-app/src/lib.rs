@@ -7,10 +7,12 @@
 //! the network.
 
 mod account;
+mod avatar;
 mod cache;
 pub mod compose;
 mod dbus;
 pub mod format;
+mod groups;
 mod hub;
 mod logging;
 mod notify;
@@ -24,7 +26,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
 use std::time::Duration;
 
-use tern_config::{ConfigWatcher, Dirs, GlobalConfig, Profile};
+use tern_config::{AvatarLookup, ConfigWatcher, Dirs, GlobalConfig, Profile};
 use tern_core::lock::{LockError, ProfileLock};
 use tern_core::thread::ThreadRow;
 use tern_core::{Flags, ops};
@@ -58,6 +60,8 @@ struct ProfileState {
     global_issues: Vec<String>,
     /// Problems with the configured PGP keys in the gpg keyring.
     pgp_issues: Vec<String>,
+    /// Sender pictures, cached in this profile's cache directory.
+    avatars: Arc<avatar::Avatars>,
     /// Desktop notifications; `None` without a notification server.
     notifier: Option<Arc<notify::Notifier>>,
     _lock: ProfileLock,
@@ -88,7 +92,12 @@ struct ListState {
     folder: Option<FolderKey>,
     threaded: bool,
     query: String,
+    filter: ListFilter,
+    /// With a filter on: rows already shown stay until the list is reopened
+    /// (opening an unread message must not make it vanish).
+    sticky: HashSet<i64>,
     rows: Vec<ThreadRow>,
+    groups: Vec<ListGroup>,
 }
 
 struct Inner {
@@ -242,6 +251,7 @@ impl App {
             issues,
             global_issues,
             pgp_issues: Vec::new(),
+            avatars: Arc::new(avatar::Avatars::new(inner.dirs.profile_cache(name).join("avatars"))),
             notifier,
             _lock: profile_lock,
             _watcher: watcher,
@@ -338,13 +348,21 @@ impl App {
     /// Make `folder` the current message list. An empty `query` lists all
     /// messages, otherwise search results (flat). Rows are in the configured
     /// order. Returns the row count.
-    pub fn open_list(&self, folder: FolderKey, threaded: bool, query: &str) -> u32 {
+    pub fn open_list(&self, folder: FolderKey, threaded: bool, query: &str, filter: ListFilter) -> u32 {
         let mut l = lock(&self.inner.list);
         l.folder = Some(folder);
         l.threaded = threaded;
         l.query = query.trim().to_owned();
+        l.filter = filter;
+        l.sticky.clear();
         self.inner.recompute_list(&mut l);
         l.rows.len() as u32
+    }
+
+    /// Date sections of the current list (empty unless sorted by date and
+    /// `group_by_date` is on). Re-read after `open_list` and `ListChanged`.
+    pub fn list_groups(&self) -> Vec<ListGroup> {
+        lock(&self.inner.list).groups.clone()
     }
 
     pub fn close_list(&self) {
@@ -598,6 +616,10 @@ impl Drop for App {
 
 /// Does the folder hold outgoing mail (Sent, Drafts or the configured Sent
 /// folder)? Same rule as the `sent`/`drafts` roles in the folder tree.
+fn person(a: &tern_core::Address) -> Person {
+    Person { name: a.name.clone().unwrap_or_default(), email: a.email.clone() }
+}
+
 fn is_outgoing(acc: &AccountRt, folder: i64) -> bool {
     let Ok(Some(f)) = acc.store.folder(folder) else { return false };
     matches!(f.role, Some(tern_core::FolderRole::Sent | tern_core::FolderRole::Drafts))
@@ -776,38 +798,71 @@ impl Inner {
     fn recompute_list(&self, l: &mut ListState) {
         let Some(folder) = &l.folder else {
             l.rows.clear();
+            l.groups.clear();
             return;
         };
         let Some(acc) = self.account(&folder.account) else {
             l.rows.clear();
+            l.groups.clear();
             return;
         };
-        let (field, order) = {
+        let (field, order, group_by_date) = {
             let g = self.global.read().unwrap_or_else(|p| p.into_inner());
-            (g.ui.message_list.sort_by, g.ui.message_list.sort_order)
+            let m = &g.ui.message_list;
+            (m.sort_by, m.sort_order, m.group_by_date)
         };
+        let filtered = l.filter.any();
+        // Sort fields (incl. flags) are needed to re-sort or to filter.
+        let inputs = (!sort::is_default(field, order) || filtered)
+            .then(|| acc.store.sort_inputs(folder.folder).unwrap_or_default());
+        let outgoing = is_outgoing(&acc, folder.folder);
         // Store and threading give newest first; other orders re-sort.
-        let custom = (!sort::is_default(field, order)).then(|| {
-            let inputs = acc.store.sort_inputs(folder.folder).unwrap_or_default();
-            (inputs, is_outgoing(&acc, folder.folder))
-        });
-        let flat = |ids: Vec<i64>| {
-            let ids = match &custom {
-                Some((inputs, outgoing)) => sort::sort_flat(ids, inputs, field, order, *outgoing),
+        let custom = inputs.as_ref().filter(|_| !sort::is_default(field, order));
+        let flat = |ids: Vec<i64>| -> Vec<ThreadRow> {
+            let ids = match custom {
+                Some(inputs) => sort::sort_flat(ids, inputs, field, order, outgoing),
                 None => ids,
             };
             ids.into_iter().map(|id| ThreadRow { id, depth: 0, thread_size: 0 }).collect()
         };
-        l.rows = if !l.query.is_empty() {
+        let threaded = l.threaded && l.query.is_empty() && !filtered;
+        l.rows = if filtered {
+            let ids = if l.query.is_empty() {
+                acc.store.ids_by_date(folder.folder).unwrap_or_default()
+            } else {
+                acc.store.search(Some(folder.folder), &l.query, 5000).unwrap_or_default()
+            };
+            let by_id: HashMap<i64, &tern_core::store::SortInput> =
+                inputs.iter().flatten().map(|m| (m.id, m)).collect();
+            let f = l.filter;
+            let matches = |m: &tern_core::store::SortInput| {
+                (!f.unread || !m.flags.contains(Flags::SEEN))
+                    && (!f.flagged || m.flags.contains(Flags::FLAGGED))
+                    && (!f.attachments || m.has_attachments)
+            };
+            let sticky = &l.sticky;
+            flat(
+                ids.into_iter().filter(|id| sticky.contains(id) || by_id.get(id).is_some_and(|m| matches(m))).collect(),
+            )
+        } else if !l.query.is_empty() {
             flat(acc.store.search(Some(folder.folder), &l.query, 5000).unwrap_or_default())
-        } else if l.threaded {
+        } else if threaded {
             let rows = tern_core::thread::thread(&acc.store.thread_inputs(folder.folder).unwrap_or_default());
-            match &custom {
-                Some((inputs, outgoing)) => sort::sort_threads(rows, inputs, field, order, *outgoing),
+            match custom {
+                Some(inputs) => sort::sort_threads(rows, inputs, field, order, outgoing),
                 None => rows,
             }
         } else {
             flat(acc.store.ids_by_date(folder.folder).unwrap_or_default())
+        };
+        if filtered {
+            l.sticky = l.rows.iter().map(|r| r.id).collect();
+        }
+        l.groups = if group_by_date && field == tern_config::ListField::Date {
+            let dates = acc.store.dates(folder.folder).unwrap_or_default();
+            groups::date_groups(&l.rows, &dates, threaded, chrono::Local::now().date_naive())
+        } else {
+            Vec::new()
         };
     }
 
@@ -862,7 +917,7 @@ impl Inner {
         Some(r)
     }
 
-    async fn load_message(&self, key: MessageKey) {
+    async fn load_message(self: &Arc<Self>, key: MessageKey) {
         let Some(acc) = self.account(&key.account) else { return };
         let Some(m) = acc.store.message(key.id).ok().flatten() else {
             self.hub.error("Message not found".into());
@@ -892,6 +947,12 @@ impl Inner {
                 signature: SignatureState::None,
                 signature_text: String::new(),
                 headers: Vec::new(),
+                sender: e.from.first().map(person).unwrap_or_default(),
+                to_people: e.to.iter().map(person).collect(),
+                cc_people: e.cc.iter().map(person).collect(),
+                // Not rendered yet, so remote content isn't known to be allowed:
+                // only a cached picture.
+                avatar: self.sender_avatar(e.from.first().map(|a| a.email.as_str()).unwrap_or_default(), false),
                 body_missing: true,
             }));
             return;
@@ -901,7 +962,6 @@ impl Inner {
         if lock(&self.current).as_ref() != Some(&key) {
             return;
         }
-        let prefer_plain = self.global.read().unwrap_or_else(|p| p.into_inner()).ui.prefer_plain_text;
         let has_html = r.html_doc.is_some();
         self.hub.emit(Event::MessageLoaded(MessageView {
             key,
@@ -910,7 +970,9 @@ impl Inner {
             to: r.to.clone(),
             cc: r.cc.clone(),
             date: r.date,
-            url: if has_html && !prefer_plain { format!("{base}/html") } else { format!("{base}/text") },
+            // The frontend applies `prefer_plain_text` (switching to `text_url`),
+            // so HTML stays one click away.
+            url: if has_html { format!("{base}/html") } else { format!("{base}/text") },
             text_url: format!("{base}/text"),
             text: r.text.clone(),
             has_html,
@@ -926,6 +988,10 @@ impl Inner {
                 .iter()
                 .map(|(name, value)| HeaderField { name: name.clone(), value: value.clone() })
                 .collect(),
+            sender: r.sender.clone(),
+            to_people: r.to_people.clone(),
+            cc_people: r.cc_people.clone(),
+            avatar: self.sender_avatar(&r.sender.email, r.remote_allowed),
             body_missing: false,
         }));
     }
@@ -998,6 +1064,31 @@ impl Inner {
         if sound {
             self.hub.emit(Event::PlaySound { sound: notify::NEW_MAIL_SOUND.to_owned() });
         }
+    }
+
+    /// The cached picture of `email` (empty if none or `[avatars]` is off),
+    /// and a background lookup when the policy allows it and the cache is
+    /// stale: `all`, or `trusted` and this message may load remote content.
+    /// A found picture arrives as `Event::AvatarReady`.
+    fn sender_avatar(self: &Arc<Self>, email: &str, remote_allowed: bool) -> Vec<u8> {
+        let cfg = self.global_config().avatars;
+        if cfg.lookup == AvatarLookup::Off || email.is_empty() {
+            return Vec::new();
+        }
+        let Some(avatars) = lock(&self.profile).as_ref().map(|p| p.avatars.clone()) else { return Vec::new() };
+        let cached = avatars.cached(email);
+        let may_look_up = cfg.lookup == AvatarLookup::All || (cfg.lookup == AvatarLookup::Trusted && remote_allowed);
+        if cached.stale && may_look_up && avatars.begin(email) {
+            let inner = self.clone();
+            let email = email.to_owned();
+            // Blocking HTTP: off the async workers.
+            self.rt.spawn_blocking(move || {
+                if let avatar::Lookup::Found(image) = avatars.lookup(&email, &cfg.sources) {
+                    inner.hub.emit(Event::AvatarReady { email, image });
+                }
+            });
+        }
+        cached.image.unwrap_or_default()
     }
 
     fn global_config(&self) -> GlobalConfig {

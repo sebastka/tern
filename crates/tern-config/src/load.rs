@@ -212,6 +212,12 @@ pub fn load_global(config_dir: &Path) -> Result<GlobalConfig, ConfigErrors> {
         push(format!("ui.message_list.columns lists {dup:?} twice"));
     }
     validate_notifications(&cfg.notifications, &mut push);
+    if cfg.avatars.lookup != AvatarLookup::Off && cfg.avatars.sources.is_empty() {
+        push("avatars.sources must not be empty when avatars.lookup is enabled".into());
+    }
+    if let Some(dup) = first_duplicate(&cfg.avatars.sources) {
+        push(format!("avatars.sources lists {dup:?} twice"));
+    }
     if issues.is_empty() { Ok(cfg) } else { Err(ConfigErrors(issues)) }
 }
 
@@ -693,6 +699,22 @@ encrypt_when_possible = true
         assert!(!folder_matches("Lists/*", "Listsx", "/"));
         assert!(folder_matches("inbox/*", "INBOX.Archive", "."));
         assert!(!folder_matches("Archive/*", "INBOX.Archive", "."));
+    }
+
+    #[test]
+    fn avatar_settings() {
+        let t = tempfile::tempdir().unwrap();
+        let g = load_global(t.path()).unwrap();
+        assert_eq!(g.avatars.lookup, AvatarLookup::Off);
+        assert_eq!(g.avatars.sources, [AvatarSource::Webfinger, AvatarSource::Libravatar]);
+        write(t.path(), "tern.toml", "[avatars]\nlookup = \"trusted\"\nsources = [\"libravatar\"]\n");
+        let g = load_global(t.path()).unwrap();
+        assert_eq!(g.avatars.lookup, AvatarLookup::Trusted);
+        assert_eq!(g.avatars.sources, [AvatarSource::Libravatar]);
+        for bad in ["lookup = \"always\"", "lookup = \"all\"\nsources = []", "sources = [\"gravatar\"]"] {
+            write(t.path(), "tern.toml", &format!("[avatars]\n{bad}\n"));
+            assert!(load_global(t.path()).is_err(), "{bad}");
+        }
     }
 
     #[test]
