@@ -57,7 +57,7 @@ tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Only rustls without bundled roots: avatars use the system certificate store.
 ureq = { version = "3", default-features = false, features = ["rustls-no-provider"] }
-zbus = { version = "5", default-features = false, features = ["tokio"] }
+zbus = { version = "6", default-features = false, features = ["tokio"] }
 zstd = "0.14"
 
 [profile.release]
